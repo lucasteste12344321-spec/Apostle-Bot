@@ -15,7 +15,7 @@ from discord.ext import commands
 
 from config import Settings
 from database import Database
-from views import HelpAvailabilityView
+from views import HelpAvailabilityView, ReportTicketView
 
 
 logger = logging.getLogger(__name__)
@@ -670,12 +670,13 @@ class ClanCog(commands.Cog):
         intro = (
             f"{reporter.mention}\n"
             f"{staff_mentions}\n"
-            "Use `/fechar_ticket` quando esse atendimento terminar."
+            "Use o botao abaixo para fechar esse ticket quando o atendimento terminar."
         ).strip()
         report_message = await ticket_channel.send(
             content=intro,
             embed=embed,
             file=file,
+            view=ReportTicketView(self.bot),
             allowed_mentions=discord.AllowedMentions(users=True, roles=True),
         )
         proof_url = report_message.attachments[0].url if report_message.attachments else None
@@ -720,9 +721,11 @@ class ClanBot(commands.Bot):
         self.database = database
         self.invite_cache: dict[int, dict[str, InviteState]] = {}
         self.help_view = HelpAvailabilityView(self)
+        self.report_ticket_view = ReportTicketView(self)
 
     async def setup_hook(self) -> None:
         self.add_view(self.help_view)
+        self.add_view(self.report_ticket_view)
         for panel in self.database.list_help_panels():
             self.add_view(HelpAvailabilityView(self), message_id=panel["message_id"])
             logger.info(
