@@ -180,6 +180,113 @@ class Database:
                 message_id INTEGER NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS guild_feature_settings (
+                guild_id INTEGER PRIMARY KEY,
+                help_notify_role_id INTEGER,
+                ticket_panel_channel_id INTEGER,
+                ticket_panel_message_id INTEGER,
+                automod_enabled INTEGER NOT NULL DEFAULT 1,
+                anti_raid_enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL UNIQUE,
+                creator_id INTEGER NOT NULL,
+                creator_tag TEXT NOT NULL,
+                creator_display_name TEXT,
+                ticket_type TEXT NOT NULL,
+                subject TEXT,
+                target_user_id INTEGER,
+                target_user_tag TEXT,
+                status TEXT NOT NULL DEFAULT 'aberto',
+                assigned_to_id INTEGER,
+                assigned_to_tag TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                claimed_at TEXT,
+                closed_at TEXT,
+                closed_by_id INTEGER,
+                closed_by_tag TEXT,
+                transcript_path TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tickets_guild_type
+            ON tickets (guild_id, ticket_type, created_at);
+
+            CREATE TABLE IF NOT EXISTS ticket_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                actor_id INTEGER,
+                actor_tag TEXT,
+                event_type TEXT NOT NULL,
+                details TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES tickets (id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket
+            ON ticket_events (ticket_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS moderation_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                target_user_id INTEGER NOT NULL,
+                target_user_tag TEXT NOT NULL,
+                actor_id INTEGER,
+                actor_tag TEXT,
+                action_type TEXT NOT NULL,
+                reason TEXT,
+                duration_seconds INTEGER,
+                expires_at TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_moderation_actions_target
+            ON moderation_actions (guild_id, target_user_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS blacklist_entries (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_tag TEXT NOT NULL,
+                actor_id INTEGER,
+                actor_tag TEXT,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS presence_status (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_tag TEXT NOT NULL,
+                display_name TEXT,
+                status TEXT NOT NULL,
+                note TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS automod_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER,
+                user_id INTEGER,
+                user_tag TEXT,
+                event_type TEXT NOT NULL,
+                content TEXT,
+                action_taken TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_automod_events_guild
+            ON automod_events (guild_id, created_at);
             """
         )
         self.connection.commit()
@@ -622,3 +729,575 @@ class Database:
             "SELECT guild_id, channel_id, message_id, updated_at FROM help_panels"
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_feature_settings(self, guild_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM guild_feature_settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_feature_settings(self, guild_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+
+        current = self.get_feature_settings(guild_id) or {
+            "guild_id": guild_id,
+            "help_notify_role_id": None,
+            "ticket_panel_channel_id": None,
+            "ticket_panel_message_id": None,
+            "automod_enabled": 1,
+            "anti_raid_enabled": 1,
+            "updated_at": utcnow_iso(),
+        }
+        current.update(fields)
+        current["updated_at"] = utcnow_iso()
+
+        self.connection.execute(
+            """
+            INSERT INTO guild_feature_settings (
+                guild_id,
+                help_notify_role_id,
+                ticket_panel_channel_id,
+                ticket_panel_message_id,
+                automod_enabled,
+                anti_raid_enabled,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                help_notify_role_id = excluded.help_notify_role_id,
+                ticket_panel_channel_id = excluded.ticket_panel_channel_id,
+                ticket_panel_message_id = excluded.ticket_panel_message_id,
+                automod_enabled = excluded.automod_enabled,
+                anti_raid_enabled = excluded.anti_raid_enabled,
+                updated_at = excluded.updated_at
+            """,
+            (
+                current["guild_id"],
+                current["help_notify_role_id"],
+                current["ticket_panel_channel_id"],
+                current["ticket_panel_message_id"],
+                current["automod_enabled"],
+                current["anti_raid_enabled"],
+                current["updated_at"],
+            ),
+        )
+        self.connection.commit()
+
+    def list_feature_settings(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM guild_feature_settings").fetchall()
+        return [dict(row) for row in rows]
+
+    def create_ticket(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        creator_id: int,
+        creator_tag: str,
+        creator_display_name: str,
+        ticket_type: str,
+        subject: str | None,
+        target_user_id: int | None = None,
+        target_user_tag: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO tickets (
+                guild_id,
+                channel_id,
+                creator_id,
+                creator_tag,
+                creator_display_name,
+                ticket_type,
+                subject,
+                target_user_id,
+                target_user_tag,
+                metadata_json,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                channel_id,
+                creator_id,
+                creator_tag,
+                creator_display_name,
+                ticket_type,
+                subject,
+                target_user_id,
+                target_user_tag,
+                json.dumps(metadata or {}, ensure_ascii=True),
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def get_ticket_by_channel(self, channel_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM tickets WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_ticket_status(self, channel_id: int, *, status: str) -> None:
+        self.connection.execute(
+            "UPDATE tickets SET status = ? WHERE channel_id = ?",
+            (status, channel_id),
+        )
+        self.connection.commit()
+
+    def assign_ticket(
+        self,
+        channel_id: int,
+        *,
+        assigned_to_id: int,
+        assigned_to_tag: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE tickets
+            SET assigned_to_id = ?, assigned_to_tag = ?, claimed_at = ?, status = ?
+            WHERE channel_id = ?
+            """,
+            (
+                assigned_to_id,
+                assigned_to_tag,
+                utcnow_iso(),
+                "em_analise",
+                channel_id,
+            ),
+        )
+        self.connection.commit()
+
+    def close_ticket(
+        self,
+        channel_id: int,
+        *,
+        closed_by_id: int,
+        closed_by_tag: str,
+        transcript_path: str | None,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE tickets
+            SET status = ?, closed_at = ?, closed_by_id = ?, closed_by_tag = ?, transcript_path = ?
+            WHERE channel_id = ?
+            """,
+            (
+                "fechado",
+                utcnow_iso(),
+                closed_by_id,
+                closed_by_tag,
+                transcript_path,
+                channel_id,
+            ),
+        )
+        self.connection.commit()
+
+    def log_ticket_event(
+        self,
+        *,
+        ticket_id: int | None,
+        guild_id: int,
+        channel_id: int,
+        actor_id: int | None,
+        actor_tag: str | None,
+        event_type: str,
+        details: str | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO ticket_events (
+                ticket_id,
+                guild_id,
+                channel_id,
+                actor_id,
+                actor_tag,
+                event_type,
+                details,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ticket_id,
+                guild_id,
+                channel_id,
+                actor_id,
+                actor_tag,
+                event_type,
+                details,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+
+    def list_recent_tickets(self, guild_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM tickets
+            WHERE guild_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_ticket_events(self, channel_id: int, *, limit: int = 25) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM ticket_events
+            WHERE channel_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (channel_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def log_moderation_action(
+        self,
+        *,
+        guild_id: int,
+        target_user_id: int,
+        target_user_tag: str,
+        actor_id: int | None,
+        actor_tag: str | None,
+        action_type: str,
+        reason: str | None,
+        duration_seconds: int | None = None,
+        expires_at: str | None = None,
+        active: bool = True,
+    ) -> int:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO moderation_actions (
+                guild_id,
+                target_user_id,
+                target_user_tag,
+                actor_id,
+                actor_tag,
+                action_type,
+                reason,
+                duration_seconds,
+                expires_at,
+                active,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                target_user_id,
+                target_user_tag,
+                actor_id,
+                actor_tag,
+                action_type,
+                reason,
+                duration_seconds,
+                expires_at,
+                int(active),
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def get_member_moderation_history(self, guild_id: int, user_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM moderation_actions
+            WHERE guild_id = ? AND target_user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_recent_moderation_actions(self, guild_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM moderation_actions
+            WHERE guild_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_blacklist_entry(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        actor_id: int | None,
+        actor_tag: str | None,
+        reason: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO blacklist_entries (
+                guild_id,
+                user_id,
+                user_tag,
+                actor_id,
+                actor_tag,
+                reason,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                user_tag = excluded.user_tag,
+                actor_id = excluded.actor_id,
+                actor_tag = excluded.actor_tag,
+                reason = excluded.reason,
+                created_at = excluded.created_at
+            """,
+            (
+                guild_id,
+                user_id,
+                user_tag,
+                actor_id,
+                actor_tag,
+                reason,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+
+    def remove_blacklist_entry(self, guild_id: int, user_id: int) -> None:
+        self.connection.execute(
+            "DELETE FROM blacklist_entries WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        self.connection.commit()
+
+    def get_blacklist_entry(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM blacklist_entries WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_blacklist(self, guild_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM blacklist_entries
+            WHERE guild_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_presence(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        display_name: str,
+        status: str,
+        note: str | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO presence_status (
+                guild_id,
+                user_id,
+                user_tag,
+                display_name,
+                status,
+                note,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                user_tag = excluded.user_tag,
+                display_name = excluded.display_name,
+                status = excluded.status,
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            """,
+            (
+                guild_id,
+                user_id,
+                user_tag,
+                display_name,
+                status,
+                note,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+
+    def list_presence(self, guild_id: int, *, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM presence_status
+            WHERE guild_id = ?
+            ORDER BY status ASC, updated_at DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_presence(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM presence_status WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def log_automod_event(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int | None,
+        user_id: int | None,
+        user_tag: str | None,
+        event_type: str,
+        content: str | None,
+        action_taken: str | None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO automod_events (
+                guild_id,
+                channel_id,
+                user_id,
+                user_tag,
+                event_type,
+                content,
+                action_taken,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                channel_id,
+                user_id,
+                user_tag,
+                event_type,
+                content,
+                action_taken,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+
+    def list_automod_events(self, guild_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM automod_events
+            WHERE guild_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_recent_deleted_messages(self, guild_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM messages
+            WHERE guild_id = ? AND deleted_at IS NOT NULL
+            ORDER BY deleted_at DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_recent_reports(self, guild_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM reports
+            WHERE guild_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_member_reports(self, guild_id: int, user_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM reports
+            WHERE guild_id = ? AND (reporter_id = ? OR reported_id = ?)
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, user_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_recent_invite_history(self, guild_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM invite_events
+            WHERE guild_id = ?
+            ORDER BY occurred_at DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_help_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT
+                assigned_to_id AS user_id,
+                assigned_to_tag AS user_tag,
+                COUNT(*) AS total
+            FROM tickets
+            WHERE guild_id = ? AND assigned_to_id IS NOT NULL
+            GROUP BY assigned_to_id, assigned_to_tag
+            ORDER BY total DESC, assigned_to_tag ASC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_dashboard_stats(self, guild_id: int) -> dict[str, Any]:
+        messages = self.connection.execute(
+            "SELECT COUNT(*) FROM messages WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        reports = self.connection.execute(
+            "SELECT COUNT(*) FROM reports WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        tickets_open = self.connection.execute(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id = ? AND status != 'fechado'",
+            (guild_id,),
+        ).fetchone()[0]
+        moderation = self.connection.execute(
+            "SELECT COUNT(*) FROM moderation_actions WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        blacklist = self.connection.execute(
+            "SELECT COUNT(*) FROM blacklist_entries WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        automod = self.connection.execute(
+            "SELECT COUNT(*) FROM automod_events WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        return {
+            "messages": messages,
+            "reports": reports,
+            "tickets_open": tickets_open,
+            "moderation_actions": moderation,
+            "blacklist_entries": blacklist,
+            "automod_events": automod,
+        }

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import re
 from typing import TYPE_CHECKING
 
 import discord
@@ -13,21 +11,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-def is_report_ticket_channel(channel: discord.abc.GuildChannel | None) -> bool:
-    return isinstance(channel, discord.TextChannel) and bool(channel.topic and channel.topic.startswith("report_ticket:"))
-
-
-def parse_report_ticket_owner_id(channel: discord.TextChannel | None) -> int | None:
-    if not is_report_ticket_channel(channel):
-        return None
-
-    assert channel is not None
-    match = re.search(r"reporter_id=(\d+)", channel.topic or "")
-    if not match:
-        return None
-    return int(match.group(1))
 
 
 class HelpAvailabilityView(discord.ui.View):
@@ -175,46 +158,86 @@ class ReportTicketView(discord.ui.View):
 
         guild = interaction.guild
         channel = interaction.channel
-        if guild is None or not isinstance(channel, discord.TextChannel) or not is_report_ticket_channel(channel):
-            await self._send_ephemeral(interaction, "Esse botao so funciona dentro de um ticket de report.")
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await self._send_ephemeral(interaction, "Esse botao so funciona dentro de um ticket.")
             return
 
-        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
-        if member is None:
-            await self._send_ephemeral(interaction, "Nao consegui identificar seu usuario no servidor.")
+        ticket = self.bot.database.get_ticket_by_channel(channel.id)
+        if ticket is None:
+            await self._send_ephemeral(interaction, "Nao encontrei o registro desse ticket.")
             return
 
-        requester_id = parse_report_ticket_owner_id(channel)
-        can_close = bool(
-            member.id == requester_id
-            or member.guild_permissions.administrator
-            or member.id == guild.owner_id
-        )
-        if not can_close:
-            await self._send_ephemeral(interaction, "So quem abriu o ticket ou um admin pode fechar esse canal.")
-            return
+        await self.bot.close_ticket_from_interaction(interaction, ticket)
 
-        await interaction.response.send_message("Fechando o ticket em 3 segundos...", ephemeral=True)
+    @discord.ui.button(
+        label="Assumir ticket",
+        style=discord.ButtonStyle.primary,
+        custom_id="ticket:claim",
+        row=0,
+    )
+    async def claim_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.claim_ticket_from_interaction(interaction)
 
-        embed = discord.Embed(
-            title="Ticket de report fechado",
-            color=self.bot.settings.embed_color,
-            timestamp=discord.utils.utcnow(),
-        )
-        embed.add_field(name="Canal", value=channel.name, inline=True)
-        embed.add_field(name="Fechado por", value=f"{member.mention} (`{member.id}`)", inline=True)
-        embed.set_footer(text="Clan logger")
+    @discord.ui.button(
+        label="Em analise",
+        style=discord.ButtonStyle.secondary,
+        custom_id="ticket:status:em_analise",
+        row=0,
+    )
+    async def analyzing_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.set_ticket_status_from_interaction(interaction, "em_analise")
 
-        log_channel = self.bot.get_log_channel(guild)
-        if log_channel is not None:
-            try:
-                await log_channel.send(embed=embed)
-            except discord.HTTPException:
-                logger.exception("Falha ao enviar log de fechamento do ticket")
+    @discord.ui.button(
+        label="Procede",
+        style=discord.ButtonStyle.success,
+        custom_id="ticket:status:procede",
+        row=1,
+    )
+    async def accepted_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.set_ticket_status_from_interaction(interaction, "procede")
 
-        await channel.send(f"Ticket fechado por {member.mention}.")
-        await asyncio.sleep(3)
-        await channel.delete(reason=f"Ticket fechado por {member}")
+    @discord.ui.button(
+        label="Nao procede",
+        style=discord.ButtonStyle.secondary,
+        custom_id="ticket:status:nao_procede",
+        row=1,
+    )
+    async def rejected_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.set_ticket_status_from_interaction(interaction, "nao_procede")
+
+    @discord.ui.button(
+        label="Resolvido",
+        style=discord.ButtonStyle.success,
+        custom_id="ticket:status:resolvido",
+        row=1,
+    )
+    async def resolved_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.set_ticket_status_from_interaction(interaction, "resolvido")
 
     async def on_error(
         self,
@@ -226,5 +249,93 @@ class ReportTicketView(discord.ui.View):
         logger.exception("Erro no botao de fechar ticket", exc_info=error)
         await self._send_ephemeral(
             interaction,
-            "Deu erro ao fechar o ticket. Tente de novo em instantes.",
+            "Deu erro ao executar a acao do ticket. Tente de novo em instantes.",
         )
+
+
+class TicketCreationModal(discord.ui.Modal):
+    def __init__(self, bot: "ClanBot", *, ticket_type: str, title: str) -> None:
+        super().__init__(title=title)
+        self.bot = bot
+        self.ticket_type = ticket_type
+        self.subject = discord.ui.TextInput(
+            label="Resumo",
+            placeholder="Explique em uma frase o motivo do ticket",
+            max_length=120,
+        )
+        self.details = discord.ui.TextInput(
+            label="Detalhes",
+            style=discord.TextStyle.paragraph,
+            placeholder="Descreva melhor o que voce precisa",
+            max_length=1500,
+        )
+        self.target = discord.ui.TextInput(
+            label="Usuario alvo (opcional)",
+            placeholder="Use @usuario, ID ou nome se fizer sentido",
+            required=False,
+            max_length=120,
+        )
+        self.add_item(self.subject)
+        self.add_item(self.details)
+        self.add_item(self.target)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.bot.open_ticket_from_panel(
+            interaction,
+            ticket_type=self.ticket_type,
+            subject=self.subject.value,
+            details=self.details.value,
+            target_hint=self.target.value.strip() or None,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.exception("Erro ao abrir modal de ticket", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Nao consegui abrir esse ticket agora.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nao consegui abrir esse ticket agora.", ephemeral=True)
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    async def _open_modal(self, interaction: discord.Interaction, *, ticket_type: str, title: str) -> None:
+        await interaction.response.send_modal(TicketCreationModal(self.bot, ticket_type=ticket_type, title=title))
+
+    @discord.ui.button(label="Suporte", style=discord.ButtonStyle.primary, custom_id="ticket_panel:support", row=0)
+    async def support_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self._open_modal(interaction, ticket_type="support", title="Abrir ticket de suporte")
+
+    @discord.ui.button(label="Recrutamento", style=discord.ButtonStyle.success, custom_id="ticket_panel:recruitment", row=0)
+    async def recruitment_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self._open_modal(interaction, ticket_type="recruitment", title="Abrir ticket de recrutamento")
+
+    @discord.ui.button(label="Parceria", style=discord.ButtonStyle.secondary, custom_id="ticket_panel:partnership", row=0)
+    async def partnership_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self._open_modal(interaction, ticket_type="partnership", title="Abrir ticket de parceria")
+
+    @discord.ui.button(label="Denuncia", style=discord.ButtonStyle.danger, custom_id="ticket_panel:report", row=1)
+    async def report_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self._open_modal(interaction, ticket_type="report", title="Abrir ticket de denuncia")

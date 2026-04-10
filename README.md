@@ -5,9 +5,12 @@ Bot de Discord em Python para:
 - salvar mensagens, edicoes e delecoes em SQLite
 - registrar quem entrou e quem saiu do servidor
 - rastrear convites criados e quem entrou por cada convite
-- receber reports com embed pronto e prova em anexo
+- receber reports com ticket privado, prova e transcript
 - criar painel persistente para membros escolherem se podem ajudar
-- abrir ticket privado quando alguem usar `/reportar`
+- abrir painel de tickets para suporte, recrutamento, parceria e denuncia
+- aplicar warn, timeout, kick, ban e blacklist
+- registrar presenca do cla, ranking de ajuda e historicos
+- rodar automod basico, anti-raid e dashboard web simples
 
 ## Requisitos
 
@@ -24,7 +27,12 @@ Bot de Discord em Python para:
 - Read Message History
 - Manage Roles
 - Manage Server
+- Manage Channels
+- Manage Messages
 - View Audit Log
+- Moderate Members
+- Kick Members
+- Ban Members
 
 ## Intents que precisam estar ligados no portal
 
@@ -63,16 +71,16 @@ Passo a passo:
    - `DISCORD_TOKEN`
    - `DATABASE_PATH=/data/bot.sqlite3`
    - `BOT_LOG_PATH=/data/bot.log`
-   - opcionalmente `DEV_GUILD_ID`, `LOG_CHANNEL_ID`, `REPORT_CHANNEL_ID` e `HELP_CHANNEL_ID`
+   - opcionalmente `DATA_DIR=/data`, `DEV_GUILD_ID`, `LOG_CHANNEL_ID`, `REPORT_CHANNEL_ID`, `HELP_CHANNEL_ID`, `DASHBOARD_PORT` e `DASHBOARD_TOKEN`
 5. Em `Volumes`, crie um volume e monte em `/data`.
-6. Faça o primeiro deploy.
+6. Faca o primeiro deploy.
 
 Observacoes importantes para Railway:
 
-- Esse bot nao precisa de dominio publico nem porta HTTP. Ele roda como worker em background.
+- O bot pode rodar como worker em background.
+- Se quiser usar o dashboard web, exponha a porta do `DASHBOARD_PORT`.
 - Sem volume, o arquivo SQLite nao persiste entre reinicios e deploys.
 - Se voce alterar variaveis, faca um redeploy para garantir que o processo reinicie com os novos valores.
-- Para mais estabilidade, um plano pago costuma ser mais seguro para bot 24/7 do que depender apenas do free.
 
 ## Configuracao inicial dentro do Discord
 
@@ -80,17 +88,37 @@ Depois que o bot entrar no servidor:
 
 1. Use `/configurar_canais` para definir os canais de logs, reports e ajuda.
 2. Use `/painel_ajuda` para criar o painel de status de ajuda.
-3. Se quiser usar cargos ja existentes, use `/configurar_cargos_ajuda`.
+3. Use `/painel_tickets` para criar o painel de abertura de tickets.
+4. Se quiser usar cargos ja existentes, use `/configurar_cargos_ajuda`.
+5. Opcionalmente use `/configurar_notificacao_ajuda` e `/configurar_seguranca`.
 
-Depois que o painel for criado uma vez, o bot guarda a mensagem e reanexa os botoes apos reinicios e redeploys.
+Depois que o painel de ajuda for criado uma vez na versao nova, o bot guarda a mensagem e reanexa os botoes apos reinicios e redeploys.
 
 ## Comandos
 
 - `/configurar_canais`
 - `/configurar_cargos_ajuda`
+- `/configurar_notificacao_ajuda`
+- `/configurar_seguranca`
 - `/painel_ajuda`
+- `/painel_tickets`
 - `/pedir_ajuda`
 - `/reportar`
+- `/warn`
+- `/timeout`
+- `/kickar`
+- `/banir`
+- `/blacklist_add`
+- `/blacklist_remove`
+- `/blacklist_lista`
+- `/presenca`
+- `/presencas`
+- `/historico_membro`
+- `/historico_reports`
+- `/historico_convites`
+- `/mensagem_apagada`
+- `/ranking_ajuda`
+- `/exportar_dados`
 
 ## Onde os dados ficam salvos
 
@@ -104,6 +132,12 @@ Tabelas principais:
 - `invite_events`
 - `reports`
 - `help_requests`
+- `tickets`
+- `ticket_events`
+- `moderation_actions`
+- `blacklist_entries`
+- `presence_status`
+- `automod_events`
 
 ## Observacoes importantes
 
@@ -112,4 +146,6 @@ Tabelas principais:
 - Para rastrear convites, o bot precisa da permissao `Manage Server`.
 - Se o bot nao tiver `Manage Roles`, ele nao consegue criar ou trocar os cargos do sistema de ajuda.
 - Para abrir e fechar tickets de report pelo botao, o bot precisa de `Manage Channels`.
+- Para automod com timeout automatico, o bot precisa de `Moderate Members`.
+- Se voce expor o dashboard web publicamente, use `DASHBOARD_TOKEN`.
 - Se um token do bot for exposto em arquivo, log ou commit, gere um novo token no Discord Developer Portal imediatamente.

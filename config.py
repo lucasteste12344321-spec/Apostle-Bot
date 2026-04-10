@@ -43,8 +43,11 @@ class Settings:
     help_unavailable_role_name: str
     database_path: Path
     bot_log_path: Path
+    data_dir: Path
     max_messages: int
     embed_color: int
+    dashboard_port: int | None
+    dashboard_token: str | None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -62,6 +65,11 @@ class Settings:
             bot_log_path = BASE_DIR / bot_log_path
         bot_log_path.parent.mkdir(parents=True, exist_ok=True)
 
+        data_dir = Path(os.getenv("DATA_DIR", str(database_path.parent)))
+        if not data_dir.is_absolute():
+            data_dir = BASE_DIR / data_dir
+        data_dir.mkdir(parents=True, exist_ok=True)
+
         return cls(
             token=token,
             dev_guild_id=_optional_int("DEV_GUILD_ID"),
@@ -74,6 +82,9 @@ class Settings:
             or "nao disponivel ajuda",
             database_path=database_path,
             bot_log_path=bot_log_path,
+            data_dir=data_dir,
             max_messages=int(os.getenv("MAX_MESSAGES", "10000")),
             embed_color=_parse_color(os.getenv("EMBED_COLOR", "0x2B2D31")),
+            dashboard_port=_optional_int("DASHBOARD_PORT") or _optional_int("PORT"),
+            dashboard_token=(os.getenv("DASHBOARD_TOKEN", "").strip() or None),
         )
