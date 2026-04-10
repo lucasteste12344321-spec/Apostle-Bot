@@ -296,6 +296,248 @@ class TicketCreationModal(discord.ui.Modal):
             await interaction.response.send_message("Nao consegui abrir esse ticket agora.", ephemeral=True)
 
 
+class GradeTestRequestModal(discord.ui.Modal):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(title="Pedir teste de grade")
+        self.bot = bot
+        self.details = discord.ui.TextInput(
+            label="Observacoes",
+            style=discord.TextStyle.paragraph,
+            placeholder="Fale qualquer detalhe util para o avaliador",
+            required=False,
+            max_length=1200,
+        )
+        self.add_item(self.details)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.bot.open_grade_test_request(interaction, details=self.details.value.strip() or None)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.exception("Erro ao abrir pedido de teste", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Nao consegui abrir o ticket de teste agora.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nao consegui abrir o ticket de teste agora.", ephemeral=True)
+
+
+class GradeChallengeRequestModal(discord.ui.Modal):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(title="Abrir desafio de grade")
+        self.bot = bot
+        self.target = discord.ui.TextInput(
+            label="Quem voce quer desafiar",
+            placeholder="Use @usuario, ID ou nome",
+            max_length=120,
+        )
+        self.details = discord.ui.TextInput(
+            label="Observacoes",
+            style=discord.TextStyle.paragraph,
+            placeholder="Detalhes opcionais do desafio",
+            required=False,
+            max_length=1200,
+        )
+        self.add_item(self.target)
+        self.add_item(self.details)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.bot.open_grade_challenge_request(
+            interaction,
+            target_hint=self.target.value.strip(),
+            details=self.details.value.strip() or None,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.exception("Erro ao abrir desafio", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Nao consegui abrir o ticket de desafio agora.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nao consegui abrir o ticket de desafio agora.", ephemeral=True)
+
+
+class GradeEvaluationModal(discord.ui.Modal):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(title="Registrar avaliacao")
+        self.bot = bot
+        self.basics = discord.ui.TextInput(
+            label="Skills basicas",
+            placeholder="block, m1 trading, side dash, front dash, m1 catch, evasiva",
+            max_length=300,
+        )
+        self.combo = discord.ui.TextInput(label="Combo", max_length=200)
+        self.adaptation = discord.ui.TextInput(label="Adaptacao", max_length=200)
+        self.game_sense = discord.ui.TextInput(label="Nocao de jogo", max_length=200)
+        self.final_notes = discord.ui.TextInput(
+            label="Avaliacao final",
+            style=discord.TextStyle.paragraph,
+            max_length=1200,
+        )
+        self.add_item(self.basics)
+        self.add_item(self.combo)
+        self.add_item(self.adaptation)
+        self.add_item(self.game_sense)
+        self.add_item(self.final_notes)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.bot.submit_grade_evaluation_notes(
+            interaction,
+            basics_notes=self.basics.value,
+            combo_notes=self.combo.value,
+            adaptation_notes=self.adaptation.value,
+            game_sense_notes=self.game_sense.value,
+            final_notes=self.final_notes.value,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.exception("Erro ao registrar avaliacao", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Nao consegui registrar a avaliacao agora.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nao consegui registrar a avaliacao agora.", ephemeral=True)
+
+
+class GradeTestTicketView(discord.ui.View):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self._build_grade_buttons()
+
+    def _build_grade_buttons(self) -> None:
+        for index, role_id in enumerate(self.bot.settings.grade_role_ids):
+            if index < len(self.bot.settings.grade_role_labels):
+                label = self.bot.settings.grade_role_labels[index]
+            else:
+                label = f"Grade {index + 1}"
+            button = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"grade_test:assign:{role_id}",
+                row=1 + (index // 5),
+            )
+
+            async def callback(interaction: discord.Interaction, selected_role_id: int = role_id) -> None:
+                await self.bot.assign_grade_from_interaction(interaction, selected_role_id)
+
+            button.callback = callback
+            self.add_item(button)
+
+    @discord.ui.button(label="Assumir teste", style=discord.ButtonStyle.primary, custom_id="grade_test:claim", row=0)
+    async def claim_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.claim_grade_test_from_interaction(interaction)
+
+    @discord.ui.button(label="Registrar avaliacao", style=discord.ButtonStyle.success, custom_id="grade_test:evaluate", row=0)
+    async def evaluate_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await interaction.response.send_modal(GradeEvaluationModal(self.bot))
+
+    @discord.ui.button(label="Fechar ticket", style=discord.ButtonStyle.danger, custom_id="grade_test:close", row=0)
+    async def close_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        ticket = self.bot.database.get_ticket_by_channel(interaction.channel.id) if isinstance(interaction.channel, discord.TextChannel) else None
+        if ticket is None:
+            if interaction.response.is_done():
+                await interaction.followup.send("Nao encontrei esse ticket.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Nao encontrei esse ticket.", ephemeral=True)
+            return
+        await self.bot.close_ticket_from_interaction(interaction, ticket)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[discord.ui.View]) -> None:
+        del item
+        logger.exception("Erro no ticket de teste de grade", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Nao consegui concluir essa acao do teste agora.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nao consegui concluir essa acao do teste agora.", ephemeral=True)
+
+
+class GradeChallengeTicketView(discord.ui.View):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="Assumir arbitragem", style=discord.ButtonStyle.primary, custom_id="grade_challenge:claim", row=0)
+    async def claim_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.claim_grade_challenge_from_interaction(interaction)
+
+    @discord.ui.button(label="Liberar servidor", style=discord.ButtonStyle.success, custom_id="grade_challenge:release", row=0)
+    async def release_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.release_grade_challenge_server_from_interaction(interaction)
+
+    @discord.ui.button(label="Desafiante venceu", style=discord.ButtonStyle.success, custom_id="grade_challenge:challenger_won", row=1)
+    async def challenger_win_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.resolve_grade_challenge_from_interaction(interaction, challenger_won=True)
+
+    @discord.ui.button(label="Desafiado venceu", style=discord.ButtonStyle.secondary, custom_id="grade_challenge:defender_won", row=1)
+    async def defender_win_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.resolve_grade_challenge_from_interaction(interaction, challenger_won=False)
+
+    @discord.ui.button(label="Registrar dodge", style=discord.ButtonStyle.danger, custom_id="grade_challenge:dodge", row=2)
+    async def dodge_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.register_grade_challenge_dodge_from_interaction(interaction)
+
+    @discord.ui.button(label="Fechar ticket", style=discord.ButtonStyle.danger, custom_id="grade_challenge:close", row=2)
+    async def close_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        ticket = self.bot.database.get_ticket_by_channel(interaction.channel.id) if isinstance(interaction.channel, discord.TextChannel) else None
+        if ticket is None:
+            if interaction.response.is_done():
+                await interaction.followup.send("Nao encontrei esse ticket.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Nao encontrei esse ticket.", ephemeral=True)
+            return
+        await self.bot.close_ticket_from_interaction(interaction, ticket)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[discord.ui.View]) -> None:
+        del item
+        logger.exception("Erro no ticket de desafio de grade", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Nao consegui concluir essa acao do desafio agora.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nao consegui concluir essa acao do desafio agora.", ephemeral=True)
+
+
 class TicketPanelView(discord.ui.View):
     def __init__(self, bot: "ClanBot") -> None:
         super().__init__(timeout=None)
@@ -339,3 +581,21 @@ class TicketPanelView(discord.ui.View):
     ) -> None:
         del button
         await self._open_modal(interaction, ticket_type="report", title="Abrir ticket de denuncia")
+
+    @discord.ui.button(label="Pedir teste", style=discord.ButtonStyle.success, custom_id="ticket_panel:grade_test", row=1)
+    async def grade_test_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await interaction.response.send_modal(GradeTestRequestModal(self.bot))
+
+    @discord.ui.button(label="Desafio de grade", style=discord.ButtonStyle.primary, custom_id="ticket_panel:grade_challenge", row=2)
+    async def grade_challenge_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await interaction.response.send_modal(GradeChallengeRequestModal(self.bot))

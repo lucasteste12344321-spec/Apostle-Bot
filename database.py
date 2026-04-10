@@ -287,6 +287,67 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_automod_events_guild
             ON automod_events (guild_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS grade_profiles (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_tag TEXT NOT NULL,
+                current_grade_role_id INTEGER,
+                current_grade_role_name TEXT,
+                dodge_count INTEGER NOT NULL DEFAULT 0,
+                last_assessment_at TEXT,
+                last_challenge_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS grade_assessments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                ticket_id INTEGER,
+                member_id INTEGER NOT NULL,
+                member_tag TEXT NOT NULL,
+                evaluator_id INTEGER,
+                evaluator_tag TEXT,
+                basics_notes TEXT,
+                combo_notes TEXT,
+                adaptation_notes TEXT,
+                game_sense_notes TEXT,
+                final_notes TEXT,
+                assigned_grade_role_id INTEGER,
+                assigned_grade_role_name TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (ticket_id) REFERENCES tickets (id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_grade_assessments_member
+            ON grade_assessments (guild_id, member_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS grade_challenges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                ticket_id INTEGER,
+                challenger_id INTEGER NOT NULL,
+                challenger_tag TEXT NOT NULL,
+                challenged_id INTEGER NOT NULL,
+                challenged_tag TEXT NOT NULL,
+                referee_id INTEGER,
+                referee_tag TEXT,
+                challenger_role_id INTEGER,
+                challenger_role_name TEXT,
+                challenged_role_id INTEGER,
+                challenged_role_name TEXT,
+                status TEXT NOT NULL DEFAULT 'aberto',
+                result TEXT,
+                server_released_at TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                FOREIGN KEY (ticket_id) REFERENCES tickets (id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_grade_challenges_member
+            ON grade_challenges (guild_id, challenger_id, challenged_id, created_at);
             """
         )
         self.connection.commit()
@@ -1301,3 +1362,342 @@ class Database:
             "blacklist_entries": blacklist,
             "automod_events": automod,
         }
+
+    def get_grade_profile(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM grade_profiles WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_grade_profile(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        current_grade_role_id: int | None,
+        current_grade_role_name: str | None,
+        dodge_count: int | None = None,
+        last_assessment_at: str | None = None,
+        last_challenge_at: str | None = None,
+    ) -> None:
+        current = self.get_grade_profile(guild_id, user_id) or {
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "user_tag": user_tag,
+            "current_grade_role_id": None,
+            "current_grade_role_name": None,
+            "dodge_count": 0,
+            "last_assessment_at": None,
+            "last_challenge_at": None,
+            "updated_at": utcnow_iso(),
+        }
+        current["user_tag"] = user_tag
+        current["current_grade_role_id"] = current_grade_role_id
+        current["current_grade_role_name"] = current_grade_role_name
+        if dodge_count is not None:
+            current["dodge_count"] = dodge_count
+        if last_assessment_at is not None:
+            current["last_assessment_at"] = last_assessment_at
+        if last_challenge_at is not None:
+            current["last_challenge_at"] = last_challenge_at
+        current["updated_at"] = utcnow_iso()
+
+        self.connection.execute(
+            """
+            INSERT INTO grade_profiles (
+                guild_id,
+                user_id,
+                user_tag,
+                current_grade_role_id,
+                current_grade_role_name,
+                dodge_count,
+                last_assessment_at,
+                last_challenge_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                user_tag = excluded.user_tag,
+                current_grade_role_id = excluded.current_grade_role_id,
+                current_grade_role_name = excluded.current_grade_role_name,
+                dodge_count = excluded.dodge_count,
+                last_assessment_at = excluded.last_assessment_at,
+                last_challenge_at = excluded.last_challenge_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                current["guild_id"],
+                current["user_id"],
+                current["user_tag"],
+                current["current_grade_role_id"],
+                current["current_grade_role_name"],
+                current["dodge_count"],
+                current["last_assessment_at"],
+                current["last_challenge_at"],
+                current["updated_at"],
+            ),
+        )
+        self.connection.commit()
+
+    def increment_grade_dodge(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        current_grade_role_id: int | None,
+        current_grade_role_name: str | None,
+    ) -> int:
+        profile = self.get_grade_profile(guild_id, user_id)
+        dodge_count = (profile["dodge_count"] if profile else 0) + 1
+        self.upsert_grade_profile(
+            guild_id=guild_id,
+            user_id=user_id,
+            user_tag=user_tag,
+            current_grade_role_id=current_grade_role_id,
+            current_grade_role_name=current_grade_role_name,
+            dodge_count=dodge_count,
+        )
+        return dodge_count
+
+    def reset_grade_dodges(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        current_grade_role_id: int | None,
+        current_grade_role_name: str | None,
+    ) -> None:
+        self.upsert_grade_profile(
+            guild_id=guild_id,
+            user_id=user_id,
+            user_tag=user_tag,
+            current_grade_role_id=current_grade_role_id,
+            current_grade_role_name=current_grade_role_name,
+            dodge_count=0,
+        )
+
+    def get_last_grade_assessment(self, guild_id: int, member_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM grade_assessments
+            WHERE guild_id = ? AND member_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (guild_id, member_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def create_grade_assessment(
+        self,
+        *,
+        guild_id: int,
+        ticket_id: int | None,
+        member_id: int,
+        member_tag: str,
+        evaluator_id: int | None,
+        evaluator_tag: str | None,
+    ) -> int:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO grade_assessments (
+                guild_id,
+                ticket_id,
+                member_id,
+                member_tag,
+                evaluator_id,
+                evaluator_tag,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                ticket_id,
+                member_id,
+                member_tag,
+                evaluator_id,
+                evaluator_tag,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def get_grade_assessment_by_ticket(self, ticket_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM grade_assessments WHERE ticket_id = ? ORDER BY id DESC LIMIT 1",
+            (ticket_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_grade_assessment_notes(
+        self,
+        *,
+        ticket_id: int,
+        evaluator_id: int,
+        evaluator_tag: str,
+        basics_notes: str,
+        combo_notes: str,
+        adaptation_notes: str,
+        game_sense_notes: str,
+        final_notes: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE grade_assessments
+            SET evaluator_id = ?,
+                evaluator_tag = ?,
+                basics_notes = ?,
+                combo_notes = ?,
+                adaptation_notes = ?,
+                game_sense_notes = ?,
+                final_notes = ?
+            WHERE ticket_id = ?
+            """,
+            (
+                evaluator_id,
+                evaluator_tag,
+                basics_notes,
+                combo_notes,
+                adaptation_notes,
+                game_sense_notes,
+                final_notes,
+                ticket_id,
+            ),
+        )
+        self.connection.commit()
+
+    def complete_grade_assessment(
+        self,
+        *,
+        ticket_id: int,
+        evaluator_id: int,
+        evaluator_tag: str,
+        basics_notes: str,
+        combo_notes: str,
+        adaptation_notes: str,
+        game_sense_notes: str,
+        final_notes: str,
+        assigned_grade_role_id: int,
+        assigned_grade_role_name: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE grade_assessments
+            SET evaluator_id = ?,
+                evaluator_tag = ?,
+                basics_notes = ?,
+                combo_notes = ?,
+                adaptation_notes = ?,
+                game_sense_notes = ?,
+                final_notes = ?,
+                assigned_grade_role_id = ?,
+                assigned_grade_role_name = ?,
+                completed_at = ?
+            WHERE ticket_id = ?
+            """,
+            (
+                evaluator_id,
+                evaluator_tag,
+                basics_notes,
+                combo_notes,
+                adaptation_notes,
+                game_sense_notes,
+                final_notes,
+                assigned_grade_role_id,
+                assigned_grade_role_name,
+                utcnow_iso(),
+                ticket_id,
+            ),
+        )
+        self.connection.commit()
+
+    def create_grade_challenge(
+        self,
+        *,
+        guild_id: int,
+        ticket_id: int | None,
+        challenger_id: int,
+        challenger_tag: str,
+        challenged_id: int,
+        challenged_tag: str,
+        challenger_role_id: int | None,
+        challenger_role_name: str | None,
+        challenged_role_id: int | None,
+        challenged_role_name: str | None,
+    ) -> int:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO grade_challenges (
+                guild_id,
+                ticket_id,
+                challenger_id,
+                challenger_tag,
+                challenged_id,
+                challenged_tag,
+                challenger_role_id,
+                challenger_role_name,
+                challenged_role_id,
+                challenged_role_name,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                ticket_id,
+                challenger_id,
+                challenger_tag,
+                challenged_id,
+                challenged_tag,
+                challenger_role_id,
+                challenger_role_name,
+                challenged_role_id,
+                challenged_role_name,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def get_grade_challenge_by_ticket(self, ticket_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM grade_challenges WHERE ticket_id = ? ORDER BY id DESC LIMIT 1",
+            (ticket_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def assign_grade_challenge_referee(self, ticket_id: int, *, referee_id: int, referee_tag: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE grade_challenges
+            SET referee_id = ?, referee_tag = ?, status = ?
+            WHERE ticket_id = ?
+            """,
+            (referee_id, referee_tag, "arbitragem_assumida", ticket_id),
+        )
+        self.connection.commit()
+
+    def mark_grade_challenge_server_released(self, ticket_id: int) -> None:
+        self.connection.execute(
+            """
+            UPDATE grade_challenges
+            SET server_released_at = ?, status = ?
+            WHERE ticket_id = ?
+            """,
+            (utcnow_iso(), "server_liberado", ticket_id),
+        )
+        self.connection.commit()
+
+    def resolve_grade_challenge(self, ticket_id: int, *, result: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE grade_challenges
+            SET result = ?, status = ?, resolved_at = ?
+            WHERE ticket_id = ?
+            """,
+            (result, "resolvido", utcnow_iso(), ticket_id),
+        )
+        self.connection.commit()

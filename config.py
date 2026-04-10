@@ -32,6 +32,31 @@ def _parse_color(raw_value: str) -> int:
     return int(value)
 
 
+def _int_with_default(name: str, default: int | None) -> int | None:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    return int(value)
+
+
+def _parse_int_list(raw_value: str) -> tuple[int, ...]:
+    values = []
+    for item in raw_value.split(","):
+        item = item.strip()
+        if item:
+            values.append(int(item))
+    return tuple(values)
+
+
+def _parse_str_list(raw_value: str) -> tuple[str, ...]:
+    values = []
+    for item in raw_value.split(","):
+        item = item.strip()
+        if item:
+            values.append(item)
+    return tuple(values)
+
+
 @dataclass(slots=True, frozen=True)
 class Settings:
     token: str
@@ -41,6 +66,12 @@ class Settings:
     default_help_channel_id: int | None
     help_available_role_name: str
     help_unavailable_role_name: str
+    clan_member_role_id: int | None
+    evaluator_role_id: int | None
+    referee_role_id: int | None
+    referee_role_name: str
+    grade_role_ids: tuple[int, ...]
+    grade_role_labels: tuple[str, ...]
     database_path: Path
     bot_log_path: Path
     data_dir: Path
@@ -80,6 +111,23 @@ class Settings:
             or "disponivel ajudar",
             help_unavailable_role_name=os.getenv("HELP_UNAVAILABLE_ROLE_NAME", "nao disponivel ajuda").strip()
             or "nao disponivel ajuda",
+            clan_member_role_id=_int_with_default("CLAN_MEMBER_ROLE_ID", 1468359604273680385),
+            evaluator_role_id=_int_with_default("EVALUATOR_ROLE_ID", 1467266953935585442),
+            referee_role_id=_optional_int("REFEREE_ROLE_ID"),
+            referee_role_name=os.getenv("REFEREE_ROLE_NAME", "arbitro").strip() or "arbitro",
+            grade_role_ids=_parse_int_list(
+                os.getenv(
+                    "GRADE_ROLE_IDS",
+                    "1478460270069420173,1478459901196894432,1478460587896864860,"
+                    "1478476338485657773,1478460675322806273,1478460933507649587",
+                )
+            ),
+            grade_role_labels=_parse_str_list(
+                os.getenv(
+                    "GRADE_ROLE_LABELS",
+                    "Grade 3,Semi-Grade 2,Grade 2,Semi-Grade 1,Grade 1,Tops",
+                )
+            ),
             database_path=database_path,
             bot_log_path=bot_log_path,
             data_dir=data_dir,

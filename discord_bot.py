@@ -19,7 +19,13 @@ from discord.ext import commands
 
 from config import Settings
 from database import Database
-from views import HelpAvailabilityView, ReportTicketView, TicketPanelView
+from views import (
+    GradeChallengeTicketView,
+    GradeTestTicketView,
+    HelpAvailabilityView,
+    ReportTicketView,
+    TicketPanelView,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -90,6 +96,11 @@ def slugify_channel_name(value: str, *, fallback: str = "membro") -> str:
     return slug or fallback
 
 
+def normalize_lookup_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").casefold()
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 def format_duration(seconds: int | None) -> str:
     if not seconds:
         return "permanente"
@@ -108,12 +119,24 @@ def format_duration(seconds: int | None) -> str:
     return " ".join(parts) or "0m"
 
 
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 def ticket_type_label(ticket_type: str) -> str:
     return {
         "report": "Denuncia",
         "support": "Suporte",
         "recruitment": "Recrutamento",
         "partnership": "Parceria",
+        "grade_test": "Teste de grade",
+        "grade_challenge": "Desafio de grade",
     }.get(ticket_type, ticket_type)
 
 
@@ -647,7 +670,9 @@ class ClanCog(commands.Cog):
             "- `Suporte`: ajuda geral\n"
             "- `Recrutamento`: entrar no cla\n"
             "- `Parceria`: propostas e contatos\n"
-            "- `Denuncia`: abertura rapida de ticket de report"
+            "- `Denuncia`: abertura rapida de ticket de report\n"
+            "- `Pedir teste`: avaliacao de grade\n"
+            "- `Desafio de grade`: abre desafio com arbitro"
         )
 
         await interaction.response.defer(ephemeral=True)
@@ -1272,6 +1297,8 @@ class ClanBot(commands.Bot):
         self.help_view = HelpAvailabilityView(self)
         self.report_ticket_view = ReportTicketView(self)
         self.ticket_panel_view = TicketPanelView(self)
+        self.grade_test_view = GradeTestTicketView(self)
+        self.grade_challenge_view = GradeChallengeTicketView(self)
         self.recent_messages: dict[tuple[int, int], deque[datetime]] = defaultdict(lambda: deque(maxlen=8))
         self.recent_joins: dict[int, deque[datetime]] = defaultdict(deque)
         self.recent_raid_alerts: dict[int, datetime] = {}
@@ -1281,6 +1308,8 @@ class ClanBot(commands.Bot):
         self.add_view(self.help_view)
         self.add_view(self.report_ticket_view)
         self.add_view(self.ticket_panel_view)
+        self.add_view(self.grade_test_view)
+        self.add_view(self.grade_challenge_view)
         for panel in self.database.list_help_panels():
             self.add_view(HelpAvailabilityView(self), message_id=panel["message_id"])
             logger.info(
@@ -1353,18 +1382,108 @@ class ClanBot(commands.Bot):
     def can_manage_tickets(self, member: discord.Member) -> bool:
         return bool(member.guild_permissions.administrator or member.guild_permissions.manage_guild)
 
-    def get_ticket_staff_roles(self, guild: discord.Guild) -> list[discord.Role]:
-        admin_roles = []
-        staff_roles = []
+    def get_clan_member_role(self, guild: discord.Guild) -> discord.Role | None:
+        return guild.get_role(self.settings.clan_member_role_id) if self.settings.clan_member_role_id else None
+
+    def get_evaluator_role(self, guild: discord.Guild) -> discord.Role | None:
+        return guild.get_role(self.settings.evaluator_role_id) if self.settings.evaluator_role_id else None
+
+    def get_referee_role(self, guild: discord.Guild) -> discord.Role | None:
+        if self.settings.referee_role_id:
+            role = guild.get_role(self.settings.referee_role_id)
+            if role is not None:
+                return role
+
+        wanted = normalize_lookup_text(self.settings.referee_role_name)
+        for role in guild.roles:
+            if normalize_lookup_text(role.name) == wanted:
+                return role
+            if role.name.casefold() in {wanted, wanted.replace("á", "a")}:
+                return role
+        return None
+
+    def get_grade_roles(self, guild: discord.Guild) -> list[discord.Role]:
+        roles = []
+        for role_id in self.settings.grade_role_ids:
+            role = guild.get_role(role_id)
+            if role is not None:
+                roles.append(role)
+        return roles
+
+    def get_member_grade_role(self, member: discord.Member) -> discord.Role | None:
+        grade_role_ids = set(self.settings.grade_role_ids)
+        for role in member.roles:
+            if role.id in grade_role_ids:
+                return role
+        return None
+
+    def get_grade_index(self, role_id: int | None) -> int | None:
+        if role_id is None:
+            return None
+        try:
+            return list(self.settings.grade_role_ids).index(role_id)
+        except ValueError:
+            return None
+
+    def can_manage_grade_tests(self, member: discord.Member) -> bool:
+        evaluator_role = self.get_evaluator_role(member.guild)
+        return bool(
+            member.guild_permissions.administrator
+            or member.guild_permissions.manage_guild
+            or (evaluator_role and evaluator_role in member.roles)
+        )
+
+    def can_manage_grade_challenges(self, member: discord.Member) -> bool:
+        referee_role = self.get_referee_role(member.guild)
+        return bool(
+            member.guild_permissions.administrator
+            or member.guild_permissions.manage_guild
+            or (referee_role and referee_role in member.roles)
+        )
+
+    def find_member_by_hint(self, guild: discord.Guild, hint: str) -> discord.Member | None:
+        cleaned = hint.strip().replace("<@", "").replace(">", "").replace("!", "")
+        if cleaned.isdigit():
+            return guild.get_member(int(cleaned))
+
+        lowered = normalize_lookup_text(hint)
+        for member in guild.members:
+            if (
+                normalize_lookup_text(member.display_name) == lowered
+                or normalize_lookup_text(member.name) == lowered
+                or normalize_lookup_text(str(member)) == lowered
+            ):
+                return member
+        return None
+
+    def get_ticket_staff_roles(self, guild: discord.Guild, *, ticket_type: str | None = None) -> list[discord.Role]:
+        roles: list[discord.Role] = []
+        seen_ids: set[int] = set()
+
+        def add_role(role: discord.Role | None) -> None:
+            if role is None or role.is_default() or role.id in seen_ids:
+                return
+            seen_ids.add(role.id)
+            roles.append(role)
+
+        if ticket_type == "grade_test":
+            add_role(self.get_evaluator_role(guild))
+        elif ticket_type == "grade_challenge":
+            add_role(self.get_referee_role(guild))
+
         for role in guild.roles:
             if role.is_default():
                 continue
-            permissions = role.permissions
-            if permissions.administrator:
-                admin_roles.append(role)
-            elif permissions.manage_guild:
-                staff_roles.append(role)
-        return admin_roles or staff_roles
+            if role.permissions.administrator:
+                add_role(role)
+
+        for role in guild.roles:
+            if role.is_default():
+                continue
+            if role.permissions.manage_guild:
+                add_role(role)
+
+        return roles
 
     def transcripts_dir(self) -> Path:
         path = self.settings.data_dir / "transcripts"
@@ -1379,6 +1498,7 @@ class ClanBot(commands.Bot):
         ticket_type: str,
         subject: str,
         source_channel: discord.abc.GuildChannel | None,
+        extra_members: list[discord.Member] | None = None,
     ) -> tuple[discord.TextChannel, list[discord.Role]]:
         me = guild.me or guild.get_member(self.user.id if self.user else 0)
         if me is None or not me.guild_permissions.manage_channels:
@@ -1391,7 +1511,7 @@ class ClanBot(commands.Bot):
         if parent_category is None and isinstance(source_channel, discord.TextChannel):
             parent_category = source_channel.category
 
-        staff_roles = self.get_ticket_staff_roles(guild)
+        staff_roles = self.get_ticket_staff_roles(guild, ticket_type=ticket_type)
         overwrites: dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             creator: discord.PermissionOverwrite(
@@ -1411,6 +1531,16 @@ class ClanBot(commands.Bot):
                 embed_links=True,
             ),
         }
+        for extra_member in extra_members or []:
+            if extra_member.id == creator.id:
+                continue
+            overwrites[extra_member] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True,
+            )
         for role in staff_roles:
             overwrites[role] = discord.PermissionOverwrite(
                 view_channel=True,
@@ -1426,6 +1556,8 @@ class ClanBot(commands.Bot):
             "support": "ticket-suporte",
             "recruitment": "ticket-recrut",
             "partnership": "ticket-parceria",
+            "grade_test": "ticket-teste",
+            "grade_challenge": "ticket-desafio",
         }.get(ticket_type, "ticket")
         slug = slugify_channel_name(creator.display_name)
         channel_name = f"{prefix}-{slug}-{discord.utils.utcnow().strftime('%H%M%S')}"[:100]
@@ -1569,6 +1701,829 @@ class ClanBot(commands.Bot):
                 f"Seu ticket foi criado em {channel.mention}.",
                 ephemeral=True,
             )
+
+    async def open_grade_test_request(self, interaction: discord.Interaction, *, details: str | None) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse painel so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None:
+            await interaction.response.send_message("Nao consegui localizar seu usuario no servidor.", ephemeral=True)
+            return
+
+        if self.database.get_blacklist_entry(guild.id, member.id):
+            await interaction.response.send_message("Voce esta na blacklist e nao pode abrir esse ticket.", ephemeral=True)
+            return
+
+        clan_role = self.get_clan_member_role(guild)
+        if clan_role is not None and clan_role not in member.roles:
+            await interaction.response.send_message(
+                f"Voce precisa ter o cargo {clan_role.mention} para pedir teste.",
+                ephemeral=True,
+            )
+            return
+
+        last_assessment = self.database.get_last_grade_assessment(guild.id, member.id)
+        if last_assessment:
+            last_time = parse_iso_datetime(last_assessment.get("completed_at")) or parse_iso_datetime(last_assessment.get("created_at"))
+            if last_time is not None:
+                next_allowed = last_time + timedelta(days=7)
+                now = discord.utils.utcnow()
+                if next_allowed > now:
+                    remaining = next_allowed - now
+                    total_hours = int(remaining.total_seconds() // 3600)
+                    days, hours = divmod(total_hours, 24)
+                    parts = []
+                    if days:
+                        parts.append(f"{days} dia(s)")
+                    if hours:
+                        parts.append(f"{hours} hora(s)")
+                    if not parts:
+                        parts.append("menos de 1 hora")
+                    await interaction.response.send_message(
+                        "Voce so pode pedir outra avaliacao em " + ", ".join(parts) + ".",
+                        ephemeral=True,
+                    )
+                    return
+
+        await interaction.response.defer(ephemeral=True)
+        source_channel = interaction.channel if isinstance(interaction.channel, discord.abc.GuildChannel) else None
+        try:
+            ticket_channel, staff_roles = await self.create_private_ticket_channel(
+                guild=guild,
+                creator=member,
+                ticket_type="grade_test",
+                subject="Pedido de teste de grade",
+                source_channel=source_channel,
+            )
+        except RuntimeError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Nao consegui criar o ticket de teste. Verifique `Manage Channels`.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            await interaction.followup.send("O Discord recusou a criacao do ticket agora.", ephemeral=True)
+            return
+
+        ticket_id = self.database.create_ticket(
+            guild_id=guild.id,
+            channel_id=ticket_channel.id,
+            creator_id=member.id,
+            creator_tag=str(member),
+            creator_display_name=member.display_name,
+            ticket_type="grade_test",
+            subject="Pedido de teste de grade",
+            metadata={"details": details or ""},
+        )
+        self.database.create_grade_assessment(
+            guild_id=guild.id,
+            ticket_id=ticket_id,
+            member_id=member.id,
+            member_tag=str(member),
+            evaluator_id=None,
+            evaluator_tag=None,
+        )
+        self.database.log_ticket_event(
+            ticket_id=ticket_id,
+            guild_id=guild.id,
+            channel_id=ticket_channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="grade_test_created",
+            details=details or "",
+        )
+
+        embed = discord.Embed(
+            title="Ticket de teste de grade",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.description = (
+            "Avaliacao em `ft5`.\n\n"
+            "Criterios:\n"
+            "- skills basicas: block, m1 trading, side dash, front dash, m1 catch, evasiva\n"
+            "- combo\n"
+            "- adaptacao\n"
+            "- nocao de jogo"
+        )
+        embed.add_field(name="Membro", value=member.mention, inline=False)
+        embed.add_field(name="Observacoes", value=trim_text(details, 1024), inline=False)
+        embed.add_field(name="Status", value=ticket_status_label("aberto"), inline=True)
+        embed.set_footer(text="Avaliadores assumem, registram notas e escolhem a grade nos botoes.")
+
+        staff_mentions = " ".join(role.mention for role in staff_roles[:10])
+        intro = (
+            f"{member.mention}\n"
+            f"{staff_mentions}\n"
+            "Um avaliador pode assumir este teste nos botoes abaixo."
+        ).strip()
+        await ticket_channel.send(
+            content=intro,
+            embed=embed,
+            view=GradeTestTicketView(self),
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+        )
+
+        await interaction.followup.send(
+            f"Seu ticket de teste foi criado em {ticket_channel.mention}.",
+            ephemeral=True,
+        )
+
+    async def claim_grade_test_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket de teste.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_tests(member):
+            await interaction.response.send_message("So avaliadores ou admins podem assumir este teste.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "grade_test":
+            await interaction.response.send_message("Esse canal nao e um ticket de teste de grade.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse teste ja foi assumido por outro avaliador.", ephemeral=True)
+            return
+
+        self.database.assign_ticket(channel.id, assigned_to_id=member.id, assigned_to_tag=str(member))
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="grade_test_claimed",
+            details=None,
+        )
+        await interaction.response.send_message(f"Teste assumido por {member.mention}.", ephemeral=True)
+        await channel.send(f"{member.mention} assumiu este teste de grade.")
+
+    async def submit_grade_evaluation_notes(
+        self,
+        interaction: discord.Interaction,
+        *,
+        basics_notes: str,
+        combo_notes: str,
+        adaptation_notes: str,
+        game_sense_notes: str,
+        final_notes: str,
+    ) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse modal so funciona dentro do ticket de teste.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_tests(member):
+            await interaction.response.send_message("So avaliadores ou admins podem registrar a avaliacao.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "grade_test":
+            await interaction.response.send_message("Esse canal nao e um ticket de teste de grade.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse teste foi assumido por outro avaliador.", ephemeral=True)
+            return
+
+        assessment = self.database.get_grade_assessment_by_ticket(ticket["id"])
+        if assessment is None:
+            self.database.create_grade_assessment(
+                guild_id=guild.id,
+                ticket_id=ticket["id"],
+                member_id=ticket["creator_id"],
+                member_tag=ticket["creator_tag"],
+                evaluator_id=member.id,
+                evaluator_tag=str(member),
+            )
+
+        self.database.save_grade_assessment_notes(
+            ticket_id=ticket["id"],
+            evaluator_id=member.id,
+            evaluator_tag=str(member),
+            basics_notes=basics_notes,
+            combo_notes=combo_notes,
+            adaptation_notes=adaptation_notes,
+            game_sense_notes=game_sense_notes,
+            final_notes=final_notes,
+        )
+        self.database.update_ticket_status(channel.id, status="em_analise")
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="grade_notes_saved",
+            details=final_notes,
+        )
+
+        embed = discord.Embed(
+            title="Avaliacao registrada",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Avaliador", value=member.mention, inline=False)
+        embed.add_field(name="Skills basicas", value=trim_text(basics_notes, 1024), inline=False)
+        embed.add_field(name="Combo", value=trim_text(combo_notes, 1024), inline=False)
+        embed.add_field(name="Adaptacao", value=trim_text(adaptation_notes, 1024), inline=False)
+        embed.add_field(name="Nocao de jogo", value=trim_text(game_sense_notes, 1024), inline=False)
+        embed.add_field(name="Avaliacao final", value=trim_text(final_notes, 1024), inline=False)
+        embed.set_footer(text="Agora escolha a grade final em um dos botoes do ticket.")
+
+        await interaction.response.send_message(
+            "Avaliacao registrada. Agora escolha a grade final nos botoes do ticket.",
+            ephemeral=True,
+        )
+        await channel.send(embed=embed)
+
+    async def assign_grade_from_interaction(self, interaction: discord.Interaction, role_id: int) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket de teste.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_tests(member):
+            await interaction.response.send_message("So avaliadores ou admins podem definir a grade.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "grade_test":
+            await interaction.response.send_message("Esse canal nao e um ticket de teste de grade.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse teste foi assumido por outro avaliador.", ephemeral=True)
+            return
+
+        assessment = self.database.get_grade_assessment_by_ticket(ticket["id"])
+        if assessment is None or not assessment.get("final_notes"):
+            await interaction.response.send_message("Primeiro registre a avaliacao antes de escolher a grade.", ephemeral=True)
+            return
+
+        target_member = guild.get_member(assessment["member_id"]) or guild.get_member(ticket["creator_id"])
+        if target_member is None:
+            await interaction.response.send_message("Nao encontrei o membro avaliado no servidor.", ephemeral=True)
+            return
+
+        selected_role = guild.get_role(role_id)
+        if selected_role is None or role_id not in self.settings.grade_role_ids:
+            await interaction.response.send_message("Esse cargo de grade nao esta configurado no servidor.", ephemeral=True)
+            return
+
+        current_grade_roles = [role for role in target_member.roles if role.id in self.settings.grade_role_ids and role.id != selected_role.id]
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if current_grade_roles:
+                await target_member.remove_roles(*current_grade_roles, reason=f"Avaliacao de grade finalizada por {member}")
+            if selected_role not in target_member.roles:
+                await target_member.add_roles(selected_role, reason=f"Avaliacao de grade finalizada por {member}")
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Nao consegui trocar os cargos de grade. Verifique `Manage Roles` e a hierarquia do bot.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            await interaction.followup.send("Falhei ao atualizar o cargo agora. Tente de novo em instantes.", ephemeral=True)
+            return
+
+        now_iso = discord.utils.utcnow().isoformat(timespec="seconds")
+        self.database.complete_grade_assessment(
+            ticket_id=ticket["id"],
+            evaluator_id=member.id,
+            evaluator_tag=str(member),
+            basics_notes=assessment.get("basics_notes") or "",
+            combo_notes=assessment.get("combo_notes") or "",
+            adaptation_notes=assessment.get("adaptation_notes") or "",
+            game_sense_notes=assessment.get("game_sense_notes") or "",
+            final_notes=assessment.get("final_notes") or "",
+            assigned_grade_role_id=selected_role.id,
+            assigned_grade_role_name=selected_role.name,
+        )
+        self.database.upsert_grade_profile(
+            guild_id=guild.id,
+            user_id=target_member.id,
+            user_tag=str(target_member),
+            current_grade_role_id=selected_role.id,
+            current_grade_role_name=selected_role.name,
+            dodge_count=0,
+            last_assessment_at=now_iso,
+        )
+        self.database.update_ticket_status(channel.id, status="resolvido")
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="grade_assigned",
+            details=selected_role.name,
+        )
+
+        result_embed = discord.Embed(
+            title="Avaliacao final de grade",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        result_embed.add_field(name="Membro", value=target_member.mention, inline=False)
+        result_embed.add_field(name="Avaliador", value=member.mention, inline=False)
+        result_embed.add_field(name="Grade recebida", value=selected_role.mention, inline=False)
+        result_embed.add_field(name="Skills basicas", value=trim_text(assessment.get("basics_notes"), 1024), inline=False)
+        result_embed.add_field(name="Combo", value=trim_text(assessment.get("combo_notes"), 1024), inline=False)
+        result_embed.add_field(name="Adaptacao", value=trim_text(assessment.get("adaptation_notes"), 1024), inline=False)
+        result_embed.add_field(name="Nocao de jogo", value=trim_text(assessment.get("game_sense_notes"), 1024), inline=False)
+        result_embed.add_field(name="Avaliacao final", value=trim_text(assessment.get("final_notes"), 1024), inline=False)
+
+        await channel.send(content=target_member.mention, embed=result_embed)
+        await interaction.followup.send(
+            f"Grade {selected_role.mention} aplicada com sucesso em {target_member.mention}.",
+            ephemeral=True,
+        )
+
+    async def open_grade_challenge_request(
+        self,
+        interaction: discord.Interaction,
+        *,
+        target_hint: str,
+        details: str | None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse painel so funciona no servidor.", ephemeral=True)
+            return
+
+        challenger = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if challenger is None:
+            await interaction.response.send_message("Nao consegui localizar seu usuario no servidor.", ephemeral=True)
+            return
+
+        if self.database.get_blacklist_entry(guild.id, challenger.id):
+            await interaction.response.send_message("Voce esta na blacklist e nao pode abrir esse ticket.", ephemeral=True)
+            return
+
+        challenger_role = self.get_member_grade_role(challenger)
+        if challenger_role is None:
+            await interaction.response.send_message("Voce precisa ter uma grade para abrir um desafio.", ephemeral=True)
+            return
+
+        challenged = self.find_member_by_hint(guild, target_hint)
+        if challenged is None:
+            await interaction.response.send_message("Nao consegui encontrar o membro desafiado.", ephemeral=True)
+            return
+        if challenged.id == challenger.id:
+            await interaction.response.send_message("Voce nao pode desafiar a si mesmo.", ephemeral=True)
+            return
+
+        challenged_role = self.get_member_grade_role(challenged)
+        if challenged_role is None:
+            await interaction.response.send_message("Esse membro nao tem grade valida para ser desafiado.", ephemeral=True)
+            return
+
+        challenger_index = self.get_grade_index(challenger_role.id)
+        challenged_index = self.get_grade_index(challenged_role.id)
+        if challenger_index is None or challenged_index is None:
+            await interaction.response.send_message("Nao consegui validar as grades configuradas do servidor.", ephemeral=True)
+            return
+
+        if challenged_index <= challenger_index:
+            await interaction.response.send_message("Voce so pode desafiar alguem com grade acima da sua.", ephemeral=True)
+            return
+
+        if challenged_index != challenger_index + 1:
+            await interaction.response.send_message("Voce so pode desafiar no maximo uma grade acima da sua.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        source_channel = interaction.channel if isinstance(interaction.channel, discord.abc.GuildChannel) else None
+        subject = f"Desafio de grade contra {challenged.display_name}"
+        try:
+            ticket_channel, staff_roles = await self.create_private_ticket_channel(
+                guild=guild,
+                creator=challenger,
+                ticket_type="grade_challenge",
+                subject=subject,
+                source_channel=source_channel,
+                extra_members=[challenged],
+            )
+        except RuntimeError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Nao consegui criar o ticket de desafio. Verifique `Manage Channels`.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            await interaction.followup.send("O Discord recusou a criacao do ticket agora.", ephemeral=True)
+            return
+
+        ticket_id = self.database.create_ticket(
+            guild_id=guild.id,
+            channel_id=ticket_channel.id,
+            creator_id=challenger.id,
+            creator_tag=str(challenger),
+            creator_display_name=challenger.display_name,
+            ticket_type="grade_challenge",
+            subject=subject,
+            target_user_id=challenged.id,
+            target_user_tag=str(challenged),
+            metadata={"details": details or "", "target_hint": target_hint},
+        )
+        self.database.create_grade_challenge(
+            guild_id=guild.id,
+            ticket_id=ticket_id,
+            challenger_id=challenger.id,
+            challenger_tag=str(challenger),
+            challenged_id=challenged.id,
+            challenged_tag=str(challenged),
+            challenger_role_id=challenger_role.id,
+            challenger_role_name=challenger_role.name,
+            challenged_role_id=challenged_role.id,
+            challenged_role_name=challenged_role.name,
+        )
+        self.database.log_ticket_event(
+            ticket_id=ticket_id,
+            guild_id=guild.id,
+            channel_id=ticket_channel.id,
+            actor_id=challenger.id,
+            actor_tag=str(challenger),
+            event_type="grade_challenge_created",
+            details=details or target_hint,
+        )
+
+        embed = discord.Embed(
+            title="Ticket de desafio de grade",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.description = (
+            "Regras do desafio:\n"
+            "- ft10\n"
+            "- nao pode ultar\n"
+            "- todas as partidas com os dois zerados de vida e skills\n"
+            "- proibido passividade extrema"
+        )
+        embed.add_field(name="Desafiante", value=f"{challenger.mention} | {challenger_role.mention}", inline=False)
+        embed.add_field(name="Desafiado", value=f"{challenged.mention} | {challenged_role.mention}", inline=False)
+        embed.add_field(name="Observacoes", value=trim_text(details, 1024), inline=False)
+        embed.add_field(name="Status", value=ticket_status_label("aberto"), inline=True)
+        embed.set_footer(text="O arbitro assume, libera o server e registra o resultado nos botoes.")
+
+        staff_mentions = " ".join(role.mention for role in staff_roles[:10])
+        intro = (
+            f"{challenger.mention} {challenged.mention}\n"
+            f"{staff_mentions}\n"
+            "Um arbitro pode assumir a arbitragem nos botoes abaixo."
+        ).strip()
+        await ticket_channel.send(
+            content=intro,
+            embed=embed,
+            view=GradeChallengeTicketView(self),
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+        )
+
+        await interaction.followup.send(
+            f"Seu ticket de desafio foi criado em {ticket_channel.mention}.",
+            ephemeral=True,
+        )
+
+    async def claim_grade_challenge_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket de desafio.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem assumir a arbitragem.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "grade_challenge":
+            await interaction.response.send_message("Esse canal nao e um ticket de desafio de grade.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse desafio ja foi assumido por outro arbitro.", ephemeral=True)
+            return
+
+        self.database.assign_ticket(channel.id, assigned_to_id=member.id, assigned_to_tag=str(member))
+        self.database.assign_grade_challenge_referee(ticket["id"], referee_id=member.id, referee_tag=str(member))
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="grade_challenge_claimed",
+            details=None,
+        )
+        await interaction.response.send_message(f"Arbitragem assumida por {member.mention}.", ephemeral=True)
+        await channel.send(f"{member.mention} assumiu a arbitragem deste desafio.")
+
+    async def release_grade_challenge_server_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket de desafio.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem liberar o server.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "grade_challenge":
+            await interaction.response.send_message("Esse canal nao e um ticket de desafio de grade.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse desafio foi assumido por outro arbitro.", ephemeral=True)
+            return
+
+        self.database.mark_grade_challenge_server_released(ticket["id"])
+        self.database.update_ticket_status(channel.id, status="em_analise")
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="grade_challenge_server_released",
+            details=None,
+        )
+        await interaction.response.send_message("Server liberado e desafio pronto para acontecer.", ephemeral=True)
+        await channel.send(f"{member.mention} liberou o server para o desafio.")
+
+    async def resolve_grade_challenge_from_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        challenger_won: bool,
+    ) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket de desafio.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem registrar o resultado.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "grade_challenge":
+            await interaction.response.send_message("Esse canal nao e um ticket de desafio de grade.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse desafio foi assumido por outro arbitro.", ephemeral=True)
+            return
+
+        challenge = self.database.get_grade_challenge_by_ticket(ticket["id"])
+        if challenge is None:
+            await interaction.response.send_message("Nao encontrei o registro desse desafio.", ephemeral=True)
+            return
+
+        challenger = guild.get_member(challenge["challenger_id"])
+        challenged = guild.get_member(challenge["challenged_id"])
+        if challenger is None or challenged is None:
+            await interaction.response.send_message("Nao consegui localizar um dos participantes no servidor.", ephemeral=True)
+            return
+
+        challenger_role = guild.get_role(challenge["challenger_role_id"]) or self.get_member_grade_role(challenger)
+        challenged_role = guild.get_role(challenge["challenged_role_id"]) or self.get_member_grade_role(challenged)
+
+        await interaction.response.defer(ephemeral=True)
+        if challenger_won:
+            if challenger_role is None or challenged_role is None:
+                await interaction.followup.send("Nao consegui validar os cargos de grade para fazer a troca.", ephemeral=True)
+                return
+
+            try:
+                challenger_remove = [role for role in challenger.roles if role.id in self.settings.grade_role_ids and role.id != challenged_role.id]
+                challenged_remove = [role for role in challenged.roles if role.id in self.settings.grade_role_ids and role.id != challenger_role.id]
+                if challenger_remove:
+                    await challenger.remove_roles(*challenger_remove, reason=f"Resultado de desafio registrado por {member}")
+                if challenged_remove:
+                    await challenged.remove_roles(*challenged_remove, reason=f"Resultado de desafio registrado por {member}")
+                if challenged_role not in challenger.roles:
+                    await challenger.add_roles(challenged_role, reason=f"Vitoria em desafio registrada por {member}")
+                if challenger_role not in challenged.roles:
+                    await challenged.add_roles(challenger_role, reason=f"Derrota em desafio registrada por {member}")
+            except discord.Forbidden:
+                await interaction.followup.send(
+                    "Nao consegui trocar os cargos de grade. Verifique `Manage Roles` e a hierarquia do bot.",
+                    ephemeral=True,
+                )
+                return
+            except discord.HTTPException:
+                await interaction.followup.send("Falhei ao trocar os cargos agora. Tente novamente.", ephemeral=True)
+                return
+
+            challenger_final_role = challenged_role
+            challenged_final_role = challenger_role
+            result_code = "challenger_won"
+            winner_text = challenger.mention
+        else:
+            challenger_final_role = self.get_member_grade_role(challenger) or challenger_role
+            challenged_final_role = self.get_member_grade_role(challenged) or challenged_role
+            result_code = "defender_won"
+            winner_text = challenged.mention
+
+        now_iso = discord.utils.utcnow().isoformat(timespec="seconds")
+        self.database.reset_grade_dodges(
+            guild_id=guild.id,
+            user_id=challenger.id,
+            user_tag=str(challenger),
+            current_grade_role_id=challenger_final_role.id if challenger_final_role else None,
+            current_grade_role_name=challenger_final_role.name if challenger_final_role else None,
+        )
+        self.database.upsert_grade_profile(
+            guild_id=guild.id,
+            user_id=challenger.id,
+            user_tag=str(challenger),
+            current_grade_role_id=challenger_final_role.id if challenger_final_role else None,
+            current_grade_role_name=challenger_final_role.name if challenger_final_role else None,
+            last_challenge_at=now_iso,
+        )
+        self.database.reset_grade_dodges(
+            guild_id=guild.id,
+            user_id=challenged.id,
+            user_tag=str(challenged),
+            current_grade_role_id=challenged_final_role.id if challenged_final_role else None,
+            current_grade_role_name=challenged_final_role.name if challenged_final_role else None,
+        )
+        self.database.upsert_grade_profile(
+            guild_id=guild.id,
+            user_id=challenged.id,
+            user_tag=str(challenged),
+            current_grade_role_id=challenged_final_role.id if challenged_final_role else None,
+            current_grade_role_name=challenged_final_role.name if challenged_final_role else None,
+            last_challenge_at=now_iso,
+        )
+        self.database.resolve_grade_challenge(ticket["id"], result=result_code)
+        self.database.update_ticket_status(channel.id, status="resolvido")
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="grade_challenge_resolved",
+            details=result_code,
+        )
+
+        result_embed = discord.Embed(
+            title="Resultado do desafio de grade",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        result_embed.add_field(name="Vencedor", value=winner_text, inline=False)
+        result_embed.add_field(
+            name="Desafiante",
+            value=f"{challenger.mention} | {(challenger_final_role.mention if challenger_final_role else 'sem grade')}",
+            inline=False,
+        )
+        result_embed.add_field(
+            name="Desafiado",
+            value=f"{challenged.mention} | {(challenged_final_role.mention if challenged_final_role else 'sem grade')}",
+            inline=False,
+        )
+        result_embed.add_field(name="Resultado", value="Troca de grade efetuada." if challenger_won else "O desafiado manteve a grade.", inline=False)
+
+        await channel.send(embed=result_embed)
+        await interaction.followup.send("Resultado do desafio registrado com sucesso.", ephemeral=True)
+
+    async def register_grade_challenge_dodge_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket de desafio.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem registrar dodge.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "grade_challenge":
+            await interaction.response.send_message("Esse canal nao e um ticket de desafio de grade.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse desafio foi assumido por outro arbitro.", ephemeral=True)
+            return
+
+        challenge = self.database.get_grade_challenge_by_ticket(ticket["id"])
+        if challenge is None:
+            await interaction.response.send_message("Nao encontrei o registro desse desafio.", ephemeral=True)
+            return
+
+        challenged = guild.get_member(challenge["challenged_id"])
+        if challenged is None:
+            await interaction.response.send_message("Nao consegui localizar o membro desafiado.", ephemeral=True)
+            return
+
+        challenged_role = self.get_member_grade_role(challenged) or guild.get_role(challenge["challenged_role_id"])
+        dodge_count = self.database.increment_grade_dodge(
+            guild_id=guild.id,
+            user_id=challenged.id,
+            user_tag=str(challenged),
+            current_grade_role_id=challenged_role.id if challenged_role else None,
+            current_grade_role_name=challenged_role.name if challenged_role else None,
+        )
+
+        demoted_to: discord.Role | None = None
+        await interaction.response.defer(ephemeral=True)
+        if dodge_count >= 3 and challenged_role is not None:
+            current_index = self.get_grade_index(challenged_role.id)
+            if current_index is not None and current_index > 0:
+                demoted_to = guild.get_role(self.settings.grade_role_ids[current_index - 1])
+                if demoted_to is not None:
+                    try:
+                        roles_to_remove = [role for role in challenged.roles if role.id in self.settings.grade_role_ids and role.id != demoted_to.id]
+                        if roles_to_remove:
+                            await challenged.remove_roles(*roles_to_remove, reason=f"3 dodges registrados por {member}")
+                        if demoted_to not in challenged.roles:
+                            await challenged.add_roles(demoted_to, reason=f"3 dodges registrados por {member}")
+                    except discord.Forbidden:
+                        await interaction.followup.send(
+                            "Nao consegui rebaixar o membro. Verifique `Manage Roles` e a hierarquia do bot.",
+                            ephemeral=True,
+                        )
+                        return
+                    except discord.HTTPException:
+                        await interaction.followup.send("Falhei ao aplicar o rebaixamento agora.", ephemeral=True)
+                        return
+
+            self.database.reset_grade_dodges(
+                guild_id=guild.id,
+                user_id=challenged.id,
+                user_tag=str(challenged),
+                current_grade_role_id=demoted_to.id if demoted_to else challenged_role.id if challenged_role else None,
+                current_grade_role_name=demoted_to.name if demoted_to else challenged_role.name if challenged_role else None,
+            )
+            final_dodges = 0
+        else:
+            final_dodges = dodge_count
+
+        current_role = demoted_to or self.get_member_grade_role(challenged) or challenged_role
+        self.database.upsert_grade_profile(
+            guild_id=guild.id,
+            user_id=challenged.id,
+            user_tag=str(challenged),
+            current_grade_role_id=current_role.id if current_role else None,
+            current_grade_role_name=current_role.name if current_role else None,
+            dodge_count=final_dodges,
+        )
+        self.database.resolve_grade_challenge(ticket["id"], result="dodge")
+        self.database.update_ticket_status(channel.id, status="resolvido")
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="grade_challenge_dodge",
+            details=str(final_dodges),
+        )
+
+        embed = discord.Embed(
+            title="Dodge registrado",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Membro", value=challenged.mention, inline=False)
+        embed.add_field(name="Dodges atuais", value=str(final_dodges), inline=True)
+        if demoted_to is not None:
+            embed.add_field(name="Rebaixado para", value=demoted_to.mention, inline=True)
+        else:
+            embed.add_field(name="Aviso", value="Com 3 dodges o membro desce uma grade.", inline=False)
+
+        await channel.send(embed=embed)
+        await interaction.followup.send("Dodge registrado com sucesso.", ephemeral=True)
 
     async def claim_ticket_from_interaction(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild

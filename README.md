@@ -8,6 +8,8 @@ Bot de Discord em Python para:
 - receber reports com ticket privado, prova e transcript
 - criar painel persistente para membros escolherem se podem ajudar
 - abrir painel de tickets para suporte, recrutamento, parceria e denuncia
+- abrir ticket de teste de grade com avaliador assumindo, notas e atribuicao de grade por botoes
+- abrir ticket de desafio de grade com arbitragem, liberacao do server, resultado e dodge
 - aplicar warn, timeout, kick, ban e blacklist
 - registrar presenca do cla, ranking de ajuda e historicos
 - rodar automod basico, anti-raid e dashboard web simples
@@ -71,7 +73,7 @@ Passo a passo:
    - `DISCORD_TOKEN`
    - `DATABASE_PATH=/data/bot.sqlite3`
    - `BOT_LOG_PATH=/data/bot.log`
-   - opcionalmente `DATA_DIR=/data`, `DEV_GUILD_ID`, `LOG_CHANNEL_ID`, `REPORT_CHANNEL_ID`, `HELP_CHANNEL_ID`, `DASHBOARD_PORT` e `DASHBOARD_TOKEN`
+   - opcionalmente `DATA_DIR=/data`, `DEV_GUILD_ID`, `LOG_CHANNEL_ID`, `REPORT_CHANNEL_ID`, `HELP_CHANNEL_ID`, `CLAN_MEMBER_ROLE_ID`, `EVALUATOR_ROLE_ID`, `REFEREE_ROLE_ID`, `REFEREE_ROLE_NAME`, `GRADE_ROLE_IDS`, `GRADE_ROLE_LABELS`, `DASHBOARD_PORT` e `DASHBOARD_TOKEN`
 5. Em `Volumes`, crie um volume e monte em `/data`.
 6. Faca o primeiro deploy.
 
@@ -93,6 +95,15 @@ Depois que o bot entrar no servidor:
 5. Opcionalmente use `/configurar_notificacao_ajuda` e `/configurar_seguranca`.
 
 Depois que o painel de ajuda for criado uma vez na versao nova, o bot guarda a mensagem e reanexa os botoes apos reinicios e redeploys.
+
+No `/painel_tickets`, os botoes atuais incluem:
+
+- `Suporte`
+- `Recrutamento`
+- `Parceria`
+- `Denuncia`
+- `Pedir teste`
+- `Desafio de grade`
 
 ## Comandos
 
@@ -120,6 +131,34 @@ Depois que o painel de ajuda for criado uma vez na versao nova, o bot guarda a m
 - `/ranking_ajuda`
 - `/exportar_dados`
 
+## Sistema de grade
+
+O painel de tickets agora inclui dois fluxos competitivos:
+
+- `Pedir teste`
+  - verifica se o membro tem o cargo configurado em `CLAN_MEMBER_ROLE_ID`
+  - abre ticket privado
+  - avaliadores ou admins assumem o ticket
+  - avaliador registra notas
+  - avaliador escolhe a grade final por botoes
+  - o bot aplica o cargo e publica a avaliacao final no ticket
+
+- `Desafio de grade`
+  - desafiante informa quem quer desafiar
+  - o bot verifica se o alvo esta exatamente uma grade acima
+  - abre ticket privado para desafiante, desafiado e staff
+  - arbitro ou admin assume a arbitragem
+  - arbitro libera o server
+  - arbitro registra vencedor ou dodge
+  - se o desafiante vencer, o bot troca as grades
+  - com 3 dodges, o desafiado desce uma grade
+
+Observacoes:
+
+- A ordem das grades segue `GRADE_ROLE_IDS`.
+- Os nomes exibidos nos botoes seguem `GRADE_ROLE_LABELS`.
+- Se o cargo de arbitro tiver acento, o ideal e definir `REFEREE_ROLE_ID`.
+
 ## Onde os dados ficam salvos
 
 O banco SQLite fica em `data/bot.sqlite3` por padrao.
@@ -134,6 +173,9 @@ Tabelas principais:
 - `help_requests`
 - `tickets`
 - `ticket_events`
+- `grade_profiles`
+- `grade_assessments`
+- `grade_challenges`
 - `moderation_actions`
 - `blacklist_entries`
 - `presence_status`
