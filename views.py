@@ -565,6 +565,30 @@ class GradeChallengeTicketView(discord.ui.View):
             await interaction.response.send_message("Nao consegui concluir essa acao do desafio agora.", ephemeral=True)
 
 
+class GradePanelView(discord.ui.View):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="Pedir teste", style=discord.ButtonStyle.success, custom_id="grade_panel:grade_test", row=0)
+    async def grade_test_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await interaction.response.send_modal(GradeTestRequestModal(self.bot))
+
+    @discord.ui.button(label="Desafio de grade", style=discord.ButtonStyle.primary, custom_id="grade_panel:grade_challenge", row=0)
+    async def grade_challenge_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await interaction.response.send_modal(GradeChallengeRequestModal(self.bot))
+
+
 class TicketPanelView(discord.ui.View):
     def __init__(self, bot: "ClanBot") -> None:
         super().__init__(timeout=None)
@@ -608,21 +632,3 @@ class TicketPanelView(discord.ui.View):
     ) -> None:
         del button
         await self._open_modal(interaction, ticket_type="report", title="Abrir ticket de denuncia")
-
-    @discord.ui.button(label="Pedir teste", style=discord.ButtonStyle.success, custom_id="ticket_panel:grade_test", row=1)
-    async def grade_test_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button[discord.ui.View],
-    ) -> None:
-        del button
-        await interaction.response.send_modal(GradeTestRequestModal(self.bot))
-
-    @discord.ui.button(label="Desafio de grade", style=discord.ButtonStyle.primary, custom_id="ticket_panel:grade_challenge", row=2)
-    async def grade_challenge_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button[discord.ui.View],
-    ) -> None:
-        del button
-        await interaction.response.send_modal(GradeChallengeRequestModal(self.bot))

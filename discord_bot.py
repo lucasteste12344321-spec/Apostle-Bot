@@ -21,6 +21,7 @@ from config import Settings
 from database import Database
 from views import (
     GradeChallengeTicketView,
+    GradePanelView,
     GradeTestTicketView,
     HelpAvailabilityView,
     ReportTicketView,
@@ -667,14 +668,10 @@ class ClanCog(commands.Cog):
         embed = self.build_embed("Painel de tickets", color=discord.Color.dark_blue())
         embed.description = (
             "Use os botoes abaixo para abrir um ticket privado.\n\n"
-            "**Atendimento / staff**\n"
             "- `Suporte`: ajuda geral\n"
             "- `Recrutamento`: entrar no cla\n"
             "- `Parceria`: propostas e contatos\n"
-            "- `Denuncia`: ticket privado de report\n\n"
-            "**Competitivo / grades**\n"
-            "- `Pedir teste`: avaliacao de grade\n"
-            "- `Desafio de grade`: desafio com arbitro"
+            "- `Denuncia`: ticket privado de report"
         )
 
         await interaction.response.defer(ephemeral=True)
@@ -685,6 +682,29 @@ class ClanCog(commands.Cog):
             ticket_panel_message_id=message.id,
         )
         await interaction.followup.send("Painel de tickets enviado com sucesso.", ephemeral=True)
+
+    @app_commands.command(name="painel_grades", description="Cria um painel so com as acoes de grade.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def painel_grades(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.channel is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        embed = self.build_embed("Painel de grades", color=discord.Color.dark_magenta())
+        embed.description = (
+            "Use os botoes abaixo para os fluxos competitivos.\n\n"
+            "- `Pedir teste`: abre ticket de avaliacao de grade\n"
+            "- `Desafio de grade`: abre ticket de desafio com arbitro"
+        )
+
+        await interaction.response.defer(ephemeral=True)
+        message = await interaction.channel.send(embed=embed, view=GradePanelView(self.bot))
+        self.bot.database.upsert_grade_panel(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            message_id=message.id,
+        )
+        await interaction.followup.send("Painel de grades enviado com sucesso.", ephemeral=True)
 
     @app_commands.command(name="configurar_notificacao_ajuda", description="Define um cargo para ser marcado nos pedidos de ajuda.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -1253,6 +1273,41 @@ class ClanCog(commands.Cog):
         )
         await interaction.response.send_message(embed=embed)
 
+    @app_commands.command(name="top_grades", description="Mostra o top 20 jogadores por grade do servidor.")
+    async def top_grades(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        ranked_members: list[tuple[int, int, str]] = []
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+            grade_role = self.bot.get_member_grade_role(member)
+            if grade_role is None:
+                continue
+            subtier_role = self.bot.get_member_grade_subtier_role(member)
+            grade_index = self.bot.get_grade_index(grade_role.id)
+            if grade_index is None:
+                continue
+            subtier_index = self.bot.get_grade_subtier_index(subtier_role.name if subtier_role else None)
+            display = f"{member.mention} - {grade_role.name}"
+            if subtier_role is not None:
+                display += f" | {subtier_role.name}"
+            ranked_members.append((grade_index, subtier_index, display))
+
+        if not ranked_members:
+            await interaction.response.send_message("Ninguem com grade foi encontrado no servidor.", ephemeral=True)
+            return
+
+        ranked_members.sort(key=lambda item: (-item[0], -item[1], item[2].casefold()))
+        lines = [f"**{index}.** {entry[2]}" for index, entry in enumerate(ranked_members[:20], start=1)]
+
+        embed = self.build_embed("Top 20 por grade", color=discord.Color.gold())
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Ordenado por grade e depois por low/mid/high.")
+        await interaction.response.send_message(embed=embed)
+
     @app_commands.command(name="exportar_dados", description="Exporta dados do bot em JSON.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def exportar_dados(self, interaction: discord.Interaction, tipo: str) -> None:
@@ -1299,6 +1354,7 @@ class ClanBot(commands.Bot):
         self.help_view = HelpAvailabilityView(self)
         self.report_ticket_view = ReportTicketView(self)
         self.ticket_panel_view = TicketPanelView(self)
+        self.grade_panel_view = GradePanelView(self)
         self.grade_test_view = GradeTestTicketView(self)
         self.grade_challenge_view = GradeChallengeTicketView(self)
         self.recent_messages: dict[tuple[int, int], deque[datetime]] = defaultdict(lambda: deque(maxlen=8))
@@ -1311,6 +1367,7 @@ class ClanBot(commands.Bot):
         self.add_view(self.help_view)
         self.add_view(self.report_ticket_view)
         self.add_view(self.ticket_panel_view)
+        self.add_view(self.grade_panel_view)
         self.add_view(self.grade_test_view)
         self.add_view(self.grade_challenge_view)
         for panel in self.database.list_help_panels():
@@ -1324,6 +1381,8 @@ class ClanBot(commands.Bot):
         for feature_settings in self.database.list_feature_settings():
             if feature_settings.get("ticket_panel_message_id"):
                 self.add_view(TicketPanelView(self), message_id=feature_settings["ticket_panel_message_id"])
+        for panel in self.database.list_grade_panels():
+            self.add_view(GradePanelView(self), message_id=panel["message_id"])
         await self.add_cog(ClanCog(self))
 
         if self.settings.dev_guild_id:
@@ -1459,6 +1518,16 @@ class ClanBot(commands.Bot):
             if role.id in subtier_role_ids:
                 return role
         return None
+
+    def get_grade_subtier_index(self, role_name: str | None) -> int:
+        if not role_name:
+            return -1
+        wanted = normalize_lookup_text(role_name)
+        labels = [normalize_lookup_text(label) for label in self.settings.grade_subtier_labels]
+        try:
+            return labels.index(wanted)
+        except ValueError:
+            return -1
 
     def get_grade_index(self, role_id: int | None) -> int | None:
         if role_id is None:

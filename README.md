@@ -90,9 +90,10 @@ Depois que o bot entrar no servidor:
 
 1. Use `/configurar_canais` para definir os canais de logs, reports e ajuda.
 2. Use `/painel_ajuda` para criar o painel de status de ajuda.
-3. Use `/painel_tickets` para criar o painel de abertura de tickets.
-4. Se quiser usar cargos ja existentes, use `/configurar_cargos_ajuda`.
-5. Opcionalmente use `/configurar_notificacao_ajuda` e `/configurar_seguranca`.
+3. Use `/painel_tickets` para criar o painel de atendimento e denuncias.
+4. Use `/painel_grades` para criar o painel competitivo de grades.
+5. Se quiser usar cargos ja existentes, use `/configurar_cargos_ajuda`.
+6. Opcionalmente use `/configurar_notificacao_ajuda` e `/configurar_seguranca`.
 
 Depois que o painel de ajuda for criado uma vez na versao nova, o bot guarda a mensagem e reanexa os botoes apos reinicios e redeploys.
 
@@ -102,6 +103,9 @@ No `/painel_tickets`, os botoes atuais incluem:
 - `Recrutamento`
 - `Parceria`
 - `Denuncia`
+
+No `/painel_grades`, os botoes atuais incluem:
+
 - `Pedir teste`
 - `Desafio de grade`
 
@@ -113,6 +117,7 @@ No `/painel_tickets`, os botoes atuais incluem:
 - `/configurar_seguranca`
 - `/painel_ajuda`
 - `/painel_tickets`
+- `/painel_grades`
 - `/pedir_ajuda`
 - `/reportar`
 - `/warn`
@@ -129,11 +134,12 @@ No `/painel_tickets`, os botoes atuais incluem:
 - `/historico_convites`
 - `/mensagem_apagada`
 - `/ranking_ajuda`
+- `/top_grades`
 - `/exportar_dados`
 
 ## Sistema de grade
 
-O painel de tickets agora inclui dois fluxos competitivos:
+O painel de grades agora inclui dois fluxos competitivos:
 
 - `Pedir teste`
   - verifica se o membro tem o cargo configurado em `CLAN_MEMBER_ROLE_ID`
