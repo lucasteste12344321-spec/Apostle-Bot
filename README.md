@@ -7,7 +7,7 @@ Bot de Discord em Python para:
 - rastrear convites criados e quem entrou por cada convite
 - receber reports com embed pronto e prova em anexo
 - criar painel para membros escolherem se podem ajudar
-- abrir ticket privado quando alguem usar `/pedir_ajuda`
+- abrir ticket privado quando alguem usar `/reportar`
 
 ## Requisitos
 
@@ -110,5 +110,5 @@ Tabelas principais:
 - Para descobrir quem apagou mensagem de outra pessoa, o bot precisa da permissao `View Audit Log`.
 - Para rastrear convites, o bot precisa da permissao `Manage Server`.
 - Se o bot nao tiver `Manage Roles`, ele nao consegue criar ou trocar os cargos do sistema de ajuda.
-- Para abrir e fechar tickets, o bot precisa de `Manage Channels`.
+- Para abrir e fechar tickets de report, o bot precisa de `Manage Channels`.
 - Se um token do bot for exposto em arquivo, log ou commit, gere um novo token no Discord Developer Portal imediatamente.

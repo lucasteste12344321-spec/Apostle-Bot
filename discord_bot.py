@@ -86,16 +86,16 @@ def slugify_channel_name(value: str, *, fallback: str = "membro") -> str:
     return slug or fallback
 
 
-def is_help_ticket_channel(channel: discord.abc.GuildChannel | None) -> bool:
-    return isinstance(channel, discord.TextChannel) and bool(channel.topic and channel.topic.startswith("help_ticket:"))
+def is_report_ticket_channel(channel: discord.abc.GuildChannel | None) -> bool:
+    return isinstance(channel, discord.TextChannel) and bool(channel.topic and channel.topic.startswith("report_ticket:"))
 
 
-def parse_help_ticket_requester_id(channel: discord.TextChannel | None) -> int | None:
-    if not is_help_ticket_channel(channel):
+def parse_report_ticket_owner_id(channel: discord.TextChannel | None) -> int | None:
+    if not is_report_ticket_channel(channel):
         return None
 
     assert channel is not None
-    match = re.search(r"requester_id=(\d+)", channel.topic or "")
+    match = re.search(r"reporter_id=(\d+)", channel.topic or "")
     if not match:
         return None
     return int(match.group(1))
@@ -504,48 +504,35 @@ class ClanCog(commands.Cog):
             return
 
         helpers = [member for member in available_role.members if not member.bot and member.id != requester.id]
-        source_channel = interaction.channel if isinstance(interaction.channel, discord.abc.GuildChannel) else None
+        target_channel = self.bot.get_help_channel(interaction.guild)
+        if target_channel is None and isinstance(interaction.channel, discord.TextChannel):
+            target_channel = interaction.channel
 
-        await interaction.response.defer(ephemeral=True)
-        try:
-            ticket_channel, staff_roles = await self.bot.create_help_ticket_channel(
-                guild=interaction.guild,
-                requester=requester,
-                reason=motivo,
-                source_channel=source_channel,
-            )
-        except RuntimeError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
-            return
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "Nao consegui criar o ticket. Verifique se eu tenho `Manage Channels` e `Manage Roles`.",
-                ephemeral=True,
-            )
-            return
-        except discord.HTTPException:
-            await interaction.followup.send(
-                "O Discord recusou a criacao do ticket agora. Tente novamente em instantes.",
-                ephemeral=True,
-            )
+        if target_channel is None:
+            await interaction.response.send_message("Nao encontrei um canal para enviar o pedido de ajuda.", ephemeral=True)
             return
 
-        embed = self.build_embed("Ticket de ajuda", color=discord.Color.red())
+        helper_mentions = " ".join(member.mention for member in helpers[:20])
+        if len(helpers) > 20:
+            helper_mentions = f"{helper_mentions}\n... e mais {len(helpers) - 20} membro(s) disponiveis."
+
+        embed = self.build_embed("Pedido de ajuda", color=discord.Color.red())
         embed.add_field(name="Quem pediu", value=requester.mention, inline=False)
         embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
-        embed.add_field(name="Canal de origem", value=interaction.channel.mention, inline=True)
-        embed.add_field(name="Disponiveis no momento", value=str(len(helpers)), inline=True)
-        embed.add_field(name="Staff com acesso", value=str(len(staff_roles)), inline=True)
-        embed.description = "Este ticket e privado e so pode ser visto por quem pediu ajuda e pela staff."
+        embed.add_field(name="Disponiveis encontrados", value=str(len(helpers)), inline=True)
+        embed.add_field(name="Canal de origem", value=interaction.channel.mention if interaction.channel else "Desconhecido", inline=True)
+        if not helpers:
+            embed.add_field(name="Aviso", value="Ninguem esta marcado como disponivel para ajudar agora.", inline=False)
 
-        staff_mentions = " ".join(role.mention for role in staff_roles[:10])
-        intro = (
-            f"{requester.mention}\n"
-            f"{staff_mentions}\n"
-            "Use `/fechar_ticket` quando esse atendimento terminar."
-        ).strip()
-        help_message = await ticket_channel.send(
-            content=intro,
+        content = (
+            f"{requester.mention} pediu ajuda.\n{helper_mentions}"
+            if helper_mentions
+            else f"{requester.mention} pediu ajuda, mas nao havia ninguem disponivel para marcar."
+        )
+
+        await interaction.response.defer(ephemeral=True)
+        help_message = await target_channel.send(
+            content=content,
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True, roles=True),
         )
@@ -555,31 +542,31 @@ class ClanCog(commands.Cog):
             requester_id=requester.id,
             requester_tag=str(requester),
             reason=motivo,
-            help_channel_id=ticket_channel.id,
+            help_channel_id=target_channel.id,
             request_message_id=help_message.id,
-            notified_count=len(staff_roles),
+            notified_count=len(helpers),
         )
 
-        log_embed = self.build_embed("Ticket de ajuda criado", color=discord.Color.dark_teal())
+        log_embed = self.build_embed("Pedido de ajuda enviado", color=discord.Color.dark_teal())
         log_embed.add_field(name="Solicitante", value=f"{requester.mention} (`{requester.id}`)", inline=False)
-        log_embed.add_field(name="Ticket", value=ticket_channel.mention, inline=True)
-        log_embed.add_field(name="Canal de origem", value=interaction.channel.mention, inline=True)
+        log_embed.add_field(name="Canal de ajuda", value=target_channel.mention, inline=True)
+        log_embed.add_field(name="Marcados", value=str(len(helpers)), inline=True)
         await self.emit_log(interaction.guild, log_embed)
 
         await interaction.followup.send(
-            f"Seu ticket foi criado em {ticket_channel.mention}. So voce e a staff conseguem ver esse canal.",
+            f"Seu pedido de ajuda foi enviado em {target_channel.mention}.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="fechar_ticket", description="Fecha o ticket de ajuda atual.")
+    @app_commands.command(name="fechar_ticket", description="Fecha o ticket de report atual.")
     async def fechar_ticket(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
             return
 
-        if not isinstance(interaction.channel, discord.TextChannel) or not is_help_ticket_channel(interaction.channel):
+        if not isinstance(interaction.channel, discord.TextChannel) or not is_report_ticket_channel(interaction.channel):
             await interaction.response.send_message(
-                "Esse comando so pode ser usado dentro de um ticket de ajuda.",
+                "Esse comando so pode ser usado dentro de um ticket de report.",
                 ephemeral=True,
             )
             return
@@ -589,7 +576,7 @@ class ClanCog(commands.Cog):
             await interaction.response.send_message("Nao consegui identificar seu usuario no servidor.", ephemeral=True)
             return
 
-        requester_id = parse_help_ticket_requester_id(interaction.channel)
+        requester_id = parse_report_ticket_owner_id(interaction.channel)
         can_close = bool(member.guild_permissions.manage_guild or member.guild_permissions.administrator or member.id == requester_id)
         if not can_close:
             await interaction.response.send_message(
@@ -600,7 +587,7 @@ class ClanCog(commands.Cog):
 
         await interaction.response.send_message("Fechando o ticket em 3 segundos...", ephemeral=True)
 
-        log_embed = self.build_embed("Ticket de ajuda fechado", color=discord.Color.orange())
+        log_embed = self.build_embed("Ticket de report fechado", color=discord.Color.orange())
         log_embed.add_field(name="Canal", value=interaction.channel.name, inline=True)
         log_embed.add_field(name="Fechado por", value=f"{member.mention} (`{member.id}`)", inline=True)
         await self.emit_log(interaction.guild, log_embed)
@@ -626,40 +613,87 @@ class ClanCog(commands.Cog):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
             return
 
-        target_channel = self.bot.get_report_channel(interaction.guild) or interaction.channel
-        if target_channel is None:
-            await interaction.response.send_message("Nao encontrei um canal para enviar o report.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+
+        reporter = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+        if reporter is None:
+            await interaction.followup.send("Nao consegui localizar o seu perfil no servidor.", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        source_channel = interaction.channel if isinstance(interaction.channel, discord.abc.GuildChannel) else None
+        try:
+            ticket_channel, staff_roles = await self.bot.create_report_ticket_channel(
+                guild=interaction.guild,
+                reporter=reporter,
+                reported=usuario,
+                reason=motivo,
+                source_channel=source_channel,
+            )
+        except RuntimeError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Nao consegui criar o ticket. Verifique se eu tenho `Manage Channels`.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            await interaction.followup.send(
+                "O Discord recusou a criacao do ticket agora. Tente novamente em instantes.",
+                ephemeral=True,
+            )
+            return
+
         file = await prova.to_file()
-        embed = self.build_embed("Novo report", color=discord.Color.orange())
+        embed = self.build_embed("Novo report privado", color=discord.Color.orange())
         embed.add_field(name="Reportado", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
         embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
-        embed.add_field(name="Enviado por", value=interaction.user.mention, inline=False)
+        embed.add_field(name="Enviado por", value=reporter.mention, inline=False)
+        embed.description = "Esse ticket e privado. So quem reportou e a staff podem ver."
 
         if prova.content_type and prova.content_type.startswith("image/"):
             embed.set_image(url=f"attachment://{file.filename}")
         else:
             embed.add_field(name="Arquivo", value=prova.filename, inline=False)
 
-        report_message = await target_channel.send(embed=embed, file=file)
+        staff_mentions = " ".join(role.mention for role in staff_roles[:10])
+        intro = (
+            f"{reporter.mention}\n"
+            f"{staff_mentions}\n"
+            "Use `/fechar_ticket` quando esse atendimento terminar."
+        ).strip()
+        report_message = await ticket_channel.send(
+            content=intro,
+            embed=embed,
+            file=file,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+        )
         proof_url = report_message.attachments[0].url if report_message.attachments else None
 
         self.bot.database.log_report(
             guild_id=interaction.guild.id,
-            reporter_id=interaction.user.id,
-            reporter_tag=str(interaction.user),
+            reporter_id=reporter.id,
+            reporter_tag=str(reporter),
             reported_id=usuario.id,
             reported_tag=str(usuario),
             reason=motivo,
             proof_url=proof_url,
             proof_filename=prova.filename,
-            report_channel_id=target_channel.id,
+            report_channel_id=ticket_channel.id,
             report_message_id=report_message.id,
         )
 
-        await interaction.followup.send(f"Report enviado com sucesso para {target_channel.mention}.", ephemeral=True)
+        log_embed = self.build_embed("Ticket de report criado", color=discord.Color.dark_orange())
+        log_embed.add_field(name="Reporter", value=f"{reporter.mention} (`{reporter.id}`)", inline=False)
+        log_embed.add_field(name="Reportado", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
+        log_embed.add_field(name="Ticket", value=ticket_channel.mention, inline=True)
+        await self.emit_log(interaction.guild, log_embed)
+
+        await interaction.followup.send(
+            f"Seu report foi enviado em {ticket_channel.mention}. So voce e a staff conseguem ver esse canal.",
+            ephemeral=True,
+        )
 
 
 class ClanBot(commands.Bot):
@@ -721,20 +755,24 @@ class ClanBot(commands.Bot):
         return channel if isinstance(channel, discord.TextChannel) else None
 
     def get_ticket_staff_roles(self, guild: discord.Guild) -> list[discord.Role]:
-        roles = []
+        admin_roles = []
+        staff_roles = []
         for role in guild.roles:
             if role.is_default():
                 continue
             permissions = role.permissions
-            if permissions.administrator or permissions.manage_guild:
-                roles.append(role)
-        return roles
+            if permissions.administrator:
+                admin_roles.append(role)
+            elif permissions.manage_guild:
+                staff_roles.append(role)
+        return admin_roles or staff_roles
 
-    async def create_help_ticket_channel(
+    async def create_report_ticket_channel(
         self,
         *,
         guild: discord.Guild,
-        requester: discord.Member,
+        reporter: discord.Member,
+        reported: discord.Member,
         reason: str,
         source_channel: discord.abc.GuildChannel | None,
     ) -> tuple[discord.TextChannel, list[discord.Role]]:
@@ -742,17 +780,17 @@ class ClanBot(commands.Bot):
         if me is None or not me.guild_permissions.manage_channels:
             raise RuntimeError("Eu preciso da permissao `Manage Channels` para criar tickets.")
 
-        configured_help_channel = self.get_help_channel(guild)
+        configured_report_channel = self.get_report_channel(guild)
         parent_category = None
-        if isinstance(configured_help_channel, discord.TextChannel):
-            parent_category = configured_help_channel.category
+        if isinstance(configured_report_channel, discord.TextChannel):
+            parent_category = configured_report_channel.category
         if parent_category is None and isinstance(source_channel, discord.TextChannel):
             parent_category = source_channel.category
 
         staff_roles = self.get_ticket_staff_roles(guild)
         overwrites: dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            requester: discord.PermissionOverwrite(
+            reporter: discord.PermissionOverwrite(
                 view_channel=True,
                 send_messages=True,
                 read_message_history=True,
@@ -780,12 +818,13 @@ class ClanBot(commands.Bot):
                 embed_links=True,
             )
 
-        slug = slugify_channel_name(requester.display_name)
+        slug = slugify_channel_name(reporter.display_name)
         unique_suffix = discord.utils.utcnow().strftime("%H%M%S")
-        channel_name = f"ticket-ajuda-{slug}-{unique_suffix}"[:100]
+        channel_name = f"ticket-report-{slug}-{unique_suffix}"[:100]
         topic = (
-            f"help_ticket: requester_id={requester.id}; "
-            f"requester_tag={requester}; "
+            f"report_ticket: reporter_id={reporter.id}; "
+            f"reporter_tag={reporter}; "
+            f"reported_id={reported.id}; "
             f"created_at={discord.utils.utcnow().isoformat(timespec='seconds')}; "
             f"reason={reason[:120]}"
         )
@@ -795,7 +834,7 @@ class ClanBot(commands.Bot):
             overwrites=overwrites,
             category=parent_category,
             topic=topic,
-            reason=f"Ticket de ajuda criado para {requester}",
+            reason=f"Ticket de report criado para {reporter}",
         )
         return channel, staff_roles
 
