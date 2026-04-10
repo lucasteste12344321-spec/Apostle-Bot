@@ -459,7 +459,7 @@ class ClanCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        await interaction.channel.send(embed=embed, view=self.bot.help_view)
+        await interaction.channel.send(embed=embed, view=HelpAvailabilityView(self.bot))
         await interaction.followup.send("Painel enviado com sucesso.", ephemeral=True)
 
     @app_commands.command(name="pedir_ajuda", description="Envia um pedido de ajuda e marca quem esta disponivel.")
