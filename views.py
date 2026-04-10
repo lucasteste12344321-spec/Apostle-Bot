@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import discord
@@ -7,6 +8,9 @@ import discord
 
 if TYPE_CHECKING:
     from discord_bot import ClanBot
+
+
+logger = logging.getLogger(__name__)
 
 
 class HelpAvailabilityView(discord.ui.View):
@@ -36,6 +40,18 @@ class HelpAvailabilityView(discord.ui.View):
         except RuntimeError as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
             return
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "Nao tenho permissao suficiente para criar ou gerenciar os cargos de ajuda.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                "O Discord recusou a atualizacao dos cargos agora. Tente novamente em instantes.",
+                ephemeral=True,
+            )
+            return
 
         role_to_add = available_role if available else unavailable_role
         role_to_remove = unavailable_role if available else available_role
@@ -63,6 +79,24 @@ class HelpAvailabilityView(discord.ui.View):
             f"Seu status agora esta como `{status_text}`.",
             ephemeral=True,
         )
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: discord.ui.Item[discord.ui.View],
+    ) -> None:
+        logger.exception("Erro no painel de ajuda", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "Deu erro ao atualizar seu cargo. Verifique as permissoes do bot e tente novamente.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "Deu erro ao atualizar seu cargo. Verifique as permissoes do bot e tente novamente.",
+                ephemeral=True,
+            )
 
     @discord.ui.button(
         label="Disponivel para ajudar",
