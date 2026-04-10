@@ -577,10 +577,14 @@ class ClanCog(commands.Cog):
             return
 
         requester_id = parse_report_ticket_owner_id(interaction.channel)
-        can_close = bool(member.guild_permissions.manage_guild or member.guild_permissions.administrator or member.id == requester_id)
+        can_close = bool(
+            member.id == requester_id
+            or member.guild_permissions.administrator
+            or member.id == interaction.guild.owner_id
+        )
         if not can_close:
             await interaction.response.send_message(
-                "So a staff ou quem abriu o ticket pode fechar esse canal.",
+                "So quem abriu o ticket ou um admin pode fechar esse canal.",
                 ephemeral=True,
             )
             return
