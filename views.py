@@ -6,7 +6,7 @@ import discord
 
 
 if TYPE_CHECKING:
-    from .discord_bot import ClanBot
+    from discord_bot import ClanBot
 
 
 class HelpAvailabilityView(discord.ui.View):

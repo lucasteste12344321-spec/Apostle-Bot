@@ -11,9 +11,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .config import Settings
-from .database import Database
-from .views import HelpAvailabilityView
+from config import Settings
+from database import Database
+from views import HelpAvailabilityView
 
 
 logger = logging.getLogger(__name__)

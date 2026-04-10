@@ -9,9 +9,9 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from bot.config import Settings
-from bot.database import Database
-from bot.discord_bot import ClanBot
+from config import Settings
+from database import Database
+from discord_bot import ClanBot
 
 
 def configure_logging(settings: Settings) -> None:
