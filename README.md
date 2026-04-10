@@ -73,7 +73,7 @@ Passo a passo:
    - `DISCORD_TOKEN`
    - `DATABASE_PATH=/data/bot.sqlite3`
    - `BOT_LOG_PATH=/data/bot.log`
-   - opcionalmente `DATA_DIR=/data`, `DEV_GUILD_ID`, `LOG_CHANNEL_ID`, `REPORT_CHANNEL_ID`, `HELP_CHANNEL_ID`, `CLAN_MEMBER_ROLE_ID`, `EVALUATOR_ROLE_ID`, `REFEREE_ROLE_ID`, `REFEREE_ROLE_NAME`, `GRADE_ROLE_IDS`, `GRADE_ROLE_LABELS`, `DASHBOARD_PORT` e `DASHBOARD_TOKEN`
+   - opcionalmente `DATA_DIR=/data`, `DEV_GUILD_ID`, `LOG_CHANNEL_ID`, `REPORT_CHANNEL_ID`, `HELP_CHANNEL_ID`, `CLAN_MEMBER_ROLE_ID`, `EVALUATOR_ROLE_ID`, `REFEREE_ROLE_ID`, `REFEREE_ROLE_NAME`, `GRADE_ROLE_IDS`, `GRADE_ROLE_LABELS`, `GRADE_SUBTIER_ROLE_IDS`, `GRADE_SUBTIER_LABELS`, `DASHBOARD_PORT` e `DASHBOARD_TOKEN`
 5. Em `Volumes`, crie um volume e monte em `/data`.
 6. Faca o primeiro deploy.
 
@@ -140,8 +140,10 @@ O painel de tickets agora inclui dois fluxos competitivos:
   - abre ticket privado
   - avaliadores ou admins assumem o ticket
   - avaliador registra notas
-  - avaliador escolhe a grade final por botoes
-  - o bot aplica o cargo e publica a avaliacao final no ticket
+  - avaliador escolhe a grade final e o nivel `low/mid/high` por botoes
+  - o bot aplica os cargos e publica a avaliacao final no ticket
+  - se nao houver avaliador online no momento, o horario fica registrado no ticket
+  - se o ticket nao for concluido em 1 hora, ele expira sem gerar cooldown de 7 dias
 
 - `Desafio de grade`
   - desafiante informa quem quer desafiar
@@ -157,6 +159,7 @@ Observacoes:
 
 - A ordem das grades segue `GRADE_ROLE_IDS`.
 - Os nomes exibidos nos botoes seguem `GRADE_ROLE_LABELS`.
+- Os subtieres `low/mid/high` seguem `GRADE_SUBTIER_ROLE_IDS` ou nomes em `GRADE_SUBTIER_LABELS`.
 - Se o cargo de arbitro tiver acento, o ideal e definir `REFEREE_ROLE_ID`.
 
 ## Onde os dados ficam salvos

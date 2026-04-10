@@ -402,23 +402,32 @@ class GradeTestTicketView(discord.ui.View):
         self._build_grade_buttons()
 
     def _build_grade_buttons(self) -> None:
+        subtier_labels = self.bot.settings.grade_subtier_labels or ("Low", "Mid", "High")
+        button_index = 0
         for index, role_id in enumerate(self.bot.settings.grade_role_ids):
             if index < len(self.bot.settings.grade_role_labels):
-                label = self.bot.settings.grade_role_labels[index]
+                grade_label = self.bot.settings.grade_role_labels[index]
             else:
-                label = f"Grade {index + 1}"
-            button = discord.ui.Button(
-                label=label,
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"grade_test:assign:{role_id}",
-                row=1 + (index // 5),
-            )
+                grade_label = f"Grade {index + 1}"
 
-            async def callback(interaction: discord.Interaction, selected_role_id: int = role_id) -> None:
-                await self.bot.assign_grade_from_interaction(interaction, selected_role_id)
+            for subtier in subtier_labels:
+                button = discord.ui.Button(
+                    label=f"{grade_label} {subtier}",
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=f"grade_test:assign:{role_id}:{subtier.casefold()}",
+                    row=1 + (button_index // 5),
+                )
 
-            button.callback = callback
-            self.add_item(button)
+                async def callback(
+                    interaction: discord.Interaction,
+                    selected_role_id: int = role_id,
+                    selected_subtier: str = subtier,
+                ) -> None:
+                    await self.bot.assign_grade_from_interaction(interaction, selected_role_id, selected_subtier)
+
+                button.callback = callback
+                self.add_item(button)
+                button_index += 1
 
     @discord.ui.button(label="Assumir teste", style=discord.ButtonStyle.primary, custom_id="grade_test:claim", row=0)
     async def claim_button(
@@ -437,6 +446,15 @@ class GradeTestTicketView(discord.ui.View):
     ) -> None:
         del button
         await interaction.response.send_modal(GradeEvaluationModal(self.bot))
+
+    @discord.ui.button(label="Ver regras", style=discord.ButtonStyle.secondary, custom_id="grade_test:rules", row=0)
+    async def rules_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.show_grade_test_rules(interaction)
 
     @discord.ui.button(label="Fechar ticket", style=discord.ButtonStyle.danger, custom_id="grade_test:close", row=0)
     async def close_button(
@@ -485,6 +503,15 @@ class GradeChallengeTicketView(discord.ui.View):
     ) -> None:
         del button
         await self.bot.release_grade_challenge_server_from_interaction(interaction)
+
+    @discord.ui.button(label="Ver regras", style=discord.ButtonStyle.secondary, custom_id="grade_challenge:rules", row=0)
+    async def rules_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.show_grade_challenge_rules(interaction)
 
     @discord.ui.button(label="Desafiante venceu", style=discord.ButtonStyle.success, custom_id="grade_challenge:challenger_won", row=1)
     async def challenger_win_button(

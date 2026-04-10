@@ -667,12 +667,14 @@ class ClanCog(commands.Cog):
         embed = self.build_embed("Painel de tickets", color=discord.Color.dark_blue())
         embed.description = (
             "Use os botoes abaixo para abrir um ticket privado.\n\n"
+            "**Atendimento / staff**\n"
             "- `Suporte`: ajuda geral\n"
             "- `Recrutamento`: entrar no cla\n"
             "- `Parceria`: propostas e contatos\n"
-            "- `Denuncia`: abertura rapida de ticket de report\n"
+            "- `Denuncia`: ticket privado de report\n\n"
+            "**Competitivo / grades**\n"
             "- `Pedir teste`: avaliacao de grade\n"
-            "- `Desafio de grade`: abre desafio com arbitro"
+            "- `Desafio de grade`: desafio com arbitro"
         )
 
         await interaction.response.defer(ephemeral=True)
@@ -1303,6 +1305,7 @@ class ClanBot(commands.Bot):
         self.recent_joins: dict[int, deque[datetime]] = defaultdict(deque)
         self.recent_raid_alerts: dict[int, datetime] = {}
         self.dashboard_runner: Any = None
+        self.ticket_timeout_task: asyncio.Task[None] | None = None
 
     async def setup_hook(self) -> None:
         self.add_view(self.help_view)
@@ -1333,8 +1336,12 @@ class ClanBot(commands.Bot):
             logger.info("Slash commands globais sincronizados: %s", len(synced))
 
         await self.start_dashboard()
+        if self.ticket_timeout_task is None:
+            self.ticket_timeout_task = asyncio.create_task(self.ticket_timeout_worker())
 
     async def close(self) -> None:
+        if self.ticket_timeout_task is not None:
+            self.ticket_timeout_task.cancel()
         if self.dashboard_runner is not None:
             await self.dashboard_runner.cleanup()
         self.database.close()
@@ -1410,10 +1417,46 @@ class ClanBot(commands.Bot):
                 roles.append(role)
         return roles
 
+    def get_grade_subtier_roles(self, guild: discord.Guild) -> list[discord.Role]:
+        roles: list[discord.Role] = []
+        if self.settings.grade_subtier_role_ids:
+            for role_id in self.settings.grade_subtier_role_ids:
+                role = guild.get_role(role_id)
+                if role is not None:
+                    roles.append(role)
+            return roles
+
+        labels = {normalize_lookup_text(label) for label in self.settings.grade_subtier_labels}
+        for role in guild.roles:
+            if normalize_lookup_text(role.name) in labels:
+                roles.append(role)
+        return roles
+
+    def find_grade_subtier_role(self, guild: discord.Guild, subtier_label: str) -> discord.Role | None:
+        wanted = normalize_lookup_text(subtier_label)
+        if self.settings.grade_subtier_role_ids:
+            for role_id in self.settings.grade_subtier_role_ids:
+                role = guild.get_role(role_id)
+                if role is not None and normalize_lookup_text(role.name) == wanted:
+                    return role
+
+        for role in guild.roles:
+            if normalize_lookup_text(role.name) == wanted:
+                return role
+        return None
+
     def get_member_grade_role(self, member: discord.Member) -> discord.Role | None:
         grade_role_ids = set(self.settings.grade_role_ids)
         for role in member.roles:
             if role.id in grade_role_ids:
+                return role
+        return None
+
+    def get_member_grade_subtier_role(self, member: discord.Member) -> discord.Role | None:
+        subtier_roles = self.get_grade_subtier_roles(member.guild)
+        subtier_role_ids = {role.id for role in subtier_roles}
+        for role in member.roles:
+            if role.id in subtier_role_ids:
                 return role
         return None
 
@@ -1489,6 +1532,55 @@ class ClanBot(commands.Bot):
         path = self.settings.data_dir / "transcripts"
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def get_online_evaluators(self, guild: discord.Guild) -> list[discord.Member]:
+        evaluator_role = self.get_evaluator_role(guild)
+        if evaluator_role is None:
+            return []
+        return [
+            member
+            for member in evaluator_role.members
+            if not member.bot and member.status != discord.Status.offline
+        ]
+
+    async def show_grade_test_rules(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="Regras do teste de grade",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.description = (
+            "Para receber uma grade, o membro precisa passar por uma avaliacao em `ft5`.\n\n"
+            "Criterios avaliados:\n"
+            "- block\n"
+            "- m1 trading\n"
+            "- side dash\n"
+            "- front dash\n"
+            "- m1 catch\n"
+            "- evasiva\n"
+            "- combo\n"
+            "- adaptacao\n"
+            "- nocao de jogo"
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def show_grade_challenge_rules(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="Regras do desafio de grade",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.description = (
+            "- ft10\n"
+            "- nao pode ultar\n"
+            "- todas as partidas com os dois zerados de vida e skills\n"
+            "- proibido passividade extrema\n"
+            "- so pode desafiar uma grade acima\n"
+            "- low desafia low, mid desafia mid, high desafia high\n"
+            "- recusar desafio conta dodge\n"
+            "- com 3 dodges, desce uma grade"
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def create_private_ticket_channel(
         self,
@@ -1727,7 +1819,7 @@ class ClanBot(commands.Bot):
 
         last_assessment = self.database.get_last_grade_assessment(guild.id, member.id)
         if last_assessment:
-            last_time = parse_iso_datetime(last_assessment.get("completed_at")) or parse_iso_datetime(last_assessment.get("created_at"))
+            last_time = parse_iso_datetime(last_assessment.get("completed_at"))
             if last_time is not None:
                 next_allowed = last_time + timedelta(days=7)
                 now = discord.utils.utcnow()
@@ -1829,6 +1921,33 @@ class ClanBot(commands.Bot):
             view=GradeTestTicketView(self),
             allowed_mentions=discord.AllowedMentions(users=True, roles=True),
         )
+
+        online_evaluators = self.get_online_evaluators(guild)
+        if not online_evaluators:
+            no_evaluator_embed = discord.Embed(
+                title="Sem avaliador disponivel agora",
+                color=self.settings.embed_color,
+                timestamp=discord.utils.utcnow(),
+            )
+            no_evaluator_embed.description = (
+                "Nenhum avaliador apareceu como online no momento da abertura.\n"
+                "Esse horario fica registrado para ajudar a mapear a demanda."
+            )
+            no_evaluator_embed.add_field(
+                name="Horario registrado",
+                value=discord.utils.utcnow().strftime("%d/%m/%Y %H:%M UTC"),
+                inline=False,
+            )
+            await ticket_channel.send(embed=no_evaluator_embed)
+            self.database.log_ticket_event(
+                ticket_id=ticket_id,
+                guild_id=guild.id,
+                channel_id=ticket_channel.id,
+                actor_id=None,
+                actor_tag=None,
+                event_type="grade_test_no_evaluator_online",
+                details=discord.utils.utcnow().isoformat(timespec="seconds"),
+            )
 
         await interaction.followup.send(
             f"Seu ticket de teste foi criado em {ticket_channel.mention}.",
@@ -1950,7 +2069,12 @@ class ClanBot(commands.Bot):
         )
         await channel.send(embed=embed)
 
-    async def assign_grade_from_interaction(self, interaction: discord.Interaction, role_id: int) -> None:
+    async def assign_grade_from_interaction(
+        self,
+        interaction: discord.Interaction,
+        role_id: int,
+        subtier_label: str,
+    ) -> None:
         guild = interaction.guild
         channel = interaction.channel
         if guild is None or not isinstance(channel, discord.TextChannel):
@@ -1986,13 +2110,26 @@ class ClanBot(commands.Bot):
             await interaction.response.send_message("Esse cargo de grade nao esta configurado no servidor.", ephemeral=True)
             return
 
+        selected_subtier_role = self.find_grade_subtier_role(guild, subtier_label)
+        if selected_subtier_role is None:
+            await interaction.response.send_message(
+                f"Nao encontrei o cargo de subtier `{subtier_label}` no servidor.",
+                ephemeral=True,
+            )
+            return
+
         current_grade_roles = [role for role in target_member.roles if role.id in self.settings.grade_role_ids and role.id != selected_role.id]
+        current_subtier_roles = [role for role in target_member.roles if role.id in {item.id for item in self.get_grade_subtier_roles(guild)} and role.id != selected_subtier_role.id]
         await interaction.response.defer(ephemeral=True)
         try:
             if current_grade_roles:
                 await target_member.remove_roles(*current_grade_roles, reason=f"Avaliacao de grade finalizada por {member}")
+            if current_subtier_roles:
+                await target_member.remove_roles(*current_subtier_roles, reason=f"Avaliacao de grade finalizada por {member}")
             if selected_role not in target_member.roles:
                 await target_member.add_roles(selected_role, reason=f"Avaliacao de grade finalizada por {member}")
+            if selected_subtier_role not in target_member.roles:
+                await target_member.add_roles(selected_subtier_role, reason=f"Avaliacao de grade finalizada por {member}")
         except discord.Forbidden:
             await interaction.followup.send(
                 "Nao consegui trocar os cargos de grade. Verifique `Manage Roles` e a hierarquia do bot.",
@@ -2043,7 +2180,7 @@ class ClanBot(commands.Bot):
         )
         result_embed.add_field(name="Membro", value=target_member.mention, inline=False)
         result_embed.add_field(name="Avaliador", value=member.mention, inline=False)
-        result_embed.add_field(name="Grade recebida", value=selected_role.mention, inline=False)
+        result_embed.add_field(name="Grade recebida", value=f"{selected_role.mention} | {selected_subtier_role.mention}", inline=False)
         result_embed.add_field(name="Skills basicas", value=trim_text(assessment.get("basics_notes"), 1024), inline=False)
         result_embed.add_field(name="Combo", value=trim_text(assessment.get("combo_notes"), 1024), inline=False)
         result_embed.add_field(name="Adaptacao", value=trim_text(assessment.get("adaptation_notes"), 1024), inline=False)
@@ -2052,7 +2189,7 @@ class ClanBot(commands.Bot):
 
         await channel.send(content=target_member.mention, embed=result_embed)
         await interaction.followup.send(
-            f"Grade {selected_role.mention} aplicada com sucesso em {target_member.mention}.",
+            f"Grade {selected_role.mention} | {selected_subtier_role.mention} aplicada com sucesso em {target_member.mention}.",
             ephemeral=True,
         )
 
@@ -2095,6 +2232,15 @@ class ClanBot(commands.Bot):
             await interaction.response.send_message("Esse membro nao tem grade valida para ser desafiado.", ephemeral=True)
             return
 
+        challenger_subtier = self.get_member_grade_subtier_role(challenger)
+        challenged_subtier = self.get_member_grade_subtier_role(challenged)
+        if challenger_subtier is None or challenged_subtier is None:
+            await interaction.response.send_message(
+                "Nao consegui validar o nivel `low/mid/high` de um dos participantes.",
+                ephemeral=True,
+            )
+            return
+
         challenger_index = self.get_grade_index(challenger_role.id)
         challenged_index = self.get_grade_index(challenged_role.id)
         if challenger_index is None or challenged_index is None:
@@ -2107,6 +2253,13 @@ class ClanBot(commands.Bot):
 
         if challenged_index != challenger_index + 1:
             await interaction.response.send_message("Voce so pode desafiar no maximo uma grade acima da sua.", ephemeral=True)
+            return
+
+        if normalize_lookup_text(challenger_subtier.name) != normalize_lookup_text(challenged_subtier.name):
+            await interaction.response.send_message(
+                "O desafio so pode acontecer entre o mesmo nivel: `low`, `mid` ou `high`.",
+                ephemeral=True,
+            )
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -2181,7 +2334,12 @@ class ClanBot(commands.Bot):
             "- proibido passividade extrema"
         )
         embed.add_field(name="Desafiante", value=f"{challenger.mention} | {challenger_role.mention}", inline=False)
-        embed.add_field(name="Desafiado", value=f"{challenged.mention} | {challenged_role.mention}", inline=False)
+        embed.add_field(
+            name="Desafiado",
+            value=f"{challenged.mention} | {challenged_role.mention}",
+            inline=False,
+        )
+        embed.add_field(name="Nivel", value=challenger_subtier.mention, inline=False)
         embed.add_field(name="Observacoes", value=trim_text(details, 1024), inline=False)
         embed.add_field(name="Status", value=ticket_status_label("aberto"), inline=True)
         embed.set_footer(text="O arbitro assume, libera o server e registra o resultado nos botoes.")
@@ -2640,6 +2798,99 @@ class ClanBot(commands.Bot):
         path.write_text("\n".join(parts), encoding="utf-8")
         return path
 
+    async def finalize_ticket_close(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        ticket: dict[str, Any],
+        *,
+        closed_by_id: int,
+        closed_by_tag: str,
+        status_label: str,
+        announcement: str,
+    ) -> None:
+        transcript_path = await self.build_ticket_transcript(channel)
+        self.database.close_ticket(
+            channel.id,
+            closed_by_id=closed_by_id,
+            closed_by_tag=closed_by_tag,
+            transcript_path=str(transcript_path),
+        )
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=closed_by_id,
+            actor_tag=closed_by_tag,
+            event_type="closed",
+            details=str(transcript_path),
+        )
+
+        log_channel = self.get_log_channel(guild) or self.get_report_channel(guild)
+        if log_channel is not None:
+            embed = discord.Embed(
+                title="Ticket fechado",
+                color=self.settings.embed_color,
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.add_field(name="Tipo", value=ticket_type_label(ticket["ticket_type"]), inline=True)
+            embed.add_field(name="Canal", value=channel.name, inline=True)
+            embed.add_field(name="Fechado por", value=closed_by_tag, inline=True)
+            embed.add_field(name="Status final", value=status_label, inline=True)
+            embed.set_footer(text="Clan logger")
+            try:
+                await log_channel.send(embed=embed, file=discord.File(transcript_path))
+            except discord.HTTPException:
+                logger.exception("Falha ao enviar transcript do ticket")
+
+        await channel.send(announcement)
+        await asyncio.sleep(3)
+        await channel.delete(reason=announcement[:100])
+
+    async def ticket_timeout_worker(self) -> None:
+        try:
+            while not self.is_closed():
+                await asyncio.sleep(60)
+                await self.expire_stale_grade_test_tickets()
+        except asyncio.CancelledError:
+            return
+
+    async def expire_stale_grade_test_tickets(self) -> None:
+        now = discord.utils.utcnow()
+        for ticket in self.database.list_open_tickets_by_type("grade_test"):
+            created_at = parse_iso_datetime(ticket.get("created_at"))
+            if created_at is None:
+                continue
+            if now - created_at < timedelta(hours=1):
+                continue
+
+            guild = self.get_guild(ticket["guild_id"])
+            if guild is None:
+                continue
+            channel = guild.get_channel(ticket["channel_id"])
+            if not isinstance(channel, discord.TextChannel):
+                continue
+
+            self.database.update_ticket_status(channel.id, status="fechado")
+            self.database.log_ticket_event(
+                ticket_id=ticket["id"],
+                guild_id=guild.id,
+                channel_id=channel.id,
+                actor_id=self.user.id if self.user else None,
+                actor_tag=str(self.user) if self.user else "Sistema",
+                event_type="grade_test_expired",
+                details="Expirado por 1 hora sem finalizacao",
+            )
+            await self.finalize_ticket_close(
+                guild,
+                channel,
+                ticket,
+                closed_by_id=self.user.id if self.user else 0,
+                closed_by_tag=str(self.user) if self.user else "Sistema",
+                status_label="Expirado",
+                announcement="Ticket encerrado automaticamente por 1 hora sem resposta/finalizacao. Esse caso nao gera cooldown de 7 dias.",
+            )
+
     async def close_ticket_from_interaction(self, interaction: discord.Interaction, ticket: dict[str, Any]) -> None:
         guild = interaction.guild
         channel = interaction.channel
@@ -2667,43 +2918,15 @@ class ClanBot(commands.Bot):
             return
 
         await interaction.response.send_message("Fechando o ticket em 3 segundos...", ephemeral=True)
-        transcript_path = await self.build_ticket_transcript(channel)
-        self.database.close_ticket(
-            channel.id,
+        await self.finalize_ticket_close(
+            guild,
+            channel,
+            ticket,
             closed_by_id=member.id,
             closed_by_tag=str(member),
-            transcript_path=str(transcript_path),
+            status_label=ticket_status_label(ticket["status"]),
+            announcement=f"Ticket fechado por {member.mention}.",
         )
-        self.database.log_ticket_event(
-            ticket_id=ticket["id"],
-            guild_id=guild.id,
-            channel_id=channel.id,
-            actor_id=member.id,
-            actor_tag=str(member),
-            event_type="closed",
-            details=str(transcript_path),
-        )
-
-        log_channel = self.get_log_channel(guild) or self.get_report_channel(guild)
-        if log_channel is not None:
-            embed = discord.Embed(
-                title="Ticket fechado",
-                color=self.settings.embed_color,
-                timestamp=discord.utils.utcnow(),
-            )
-            embed.add_field(name="Tipo", value=ticket_type_label(ticket["ticket_type"]), inline=True)
-            embed.add_field(name="Canal", value=channel.name, inline=True)
-            embed.add_field(name="Fechado por", value=f"{member.mention} (`{member.id}`)", inline=True)
-            embed.add_field(name="Status final", value=ticket_status_label(ticket["status"]), inline=True)
-            embed.set_footer(text="Clan logger")
-            try:
-                await log_channel.send(embed=embed, file=discord.File(transcript_path))
-            except discord.HTTPException:
-                logger.exception("Falha ao enviar transcript do ticket")
-
-        await channel.send(f"Ticket fechado por {member.mention}.")
-        await asyncio.sleep(3)
-        await channel.delete(reason=f"Ticket fechado por {member}")
 
     async def ensure_help_roles(self, guild: discord.Guild) -> tuple[discord.Role, discord.Role]:
         settings = self.get_guild_settings(guild.id)

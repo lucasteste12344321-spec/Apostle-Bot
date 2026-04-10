@@ -72,6 +72,8 @@ class Settings:
     referee_role_name: str
     grade_role_ids: tuple[int, ...]
     grade_role_labels: tuple[str, ...]
+    grade_subtier_role_ids: tuple[int, ...]
+    grade_subtier_labels: tuple[str, ...]
     database_path: Path
     bot_log_path: Path
     data_dir: Path
@@ -128,6 +130,8 @@ class Settings:
                     "Grade 3,Semi-Grade 2,Grade 2,Semi-Grade 1,Grade 1,Tops",
                 )
             ),
+            grade_subtier_role_ids=_parse_int_list(os.getenv("GRADE_SUBTIER_ROLE_IDS", "")),
+            grade_subtier_labels=_parse_str_list(os.getenv("GRADE_SUBTIER_LABELS", "Low,Mid,High")),
             database_path=database_path,
             bot_log_path=bot_log_path,
             data_dir=data_dir,

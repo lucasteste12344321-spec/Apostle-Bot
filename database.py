@@ -1007,6 +1007,17 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_open_tickets_by_type(self, ticket_type: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM tickets
+            WHERE ticket_type = ? AND status NOT IN ('resolvido', 'fechado')
+            ORDER BY created_at ASC
+            """,
+            (ticket_type,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_ticket_events(self, channel_id: int, *, limit: int = 25) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             """
