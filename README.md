@@ -167,6 +167,7 @@ Observacoes:
 - Os nomes exibidos nos botoes seguem `GRADE_ROLE_LABELS`.
 - Os subtieres `low/mid/high` seguem `GRADE_SUBTIER_ROLE_IDS` ou nomes em `GRADE_SUBTIER_LABELS`.
 - Se o cargo de arbitro tiver acento, o ideal e definir `REFEREE_ROLE_ID`.
+- Para saber quem esta `online/offline` de verdade entre os avaliadores, o bot precisaria do `Presence Intent`. Sem isso, ele registra a demanda sem afirmar quem estava offline.
 
 ## Onde os dados ficam salvos
 

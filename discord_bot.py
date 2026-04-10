@@ -1602,7 +1602,12 @@ class ClanBot(commands.Bot):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def can_detect_member_presence(self) -> bool:
+        return bool(self.intents.presences)
+
     def get_online_evaluators(self, guild: discord.Guild) -> list[discord.Member]:
+        if not self.can_detect_member_presence():
+            return []
         evaluator_role = self.get_evaluator_role(guild)
         if evaluator_role is None:
             return []
@@ -1991,8 +1996,55 @@ class ClanBot(commands.Bot):
             allowed_mentions=discord.AllowedMentions(users=True, roles=True),
         )
 
+        evaluator_role = self.get_evaluator_role(guild)
+        evaluator_members = [member for member in (evaluator_role.members if evaluator_role else []) if not member.bot]
         online_evaluators = self.get_online_evaluators(guild)
-        if not online_evaluators:
+        if evaluator_role is None or not evaluator_members:
+            missing_embed = discord.Embed(
+                title="Sem avaliadores cadastrados",
+                color=self.settings.embed_color,
+                timestamp=discord.utils.utcnow(),
+            )
+            missing_embed.description = (
+                "Nao encontrei membros com o cargo de avaliador configurado.\n"
+                "Confira `EVALUATOR_ROLE_ID` ou o cargo no servidor."
+            )
+            await ticket_channel.send(embed=missing_embed)
+            self.database.log_ticket_event(
+                ticket_id=ticket_id,
+                guild_id=guild.id,
+                channel_id=ticket_channel.id,
+                actor_id=None,
+                actor_tag=None,
+                event_type="grade_test_no_evaluator_role_members",
+                details=discord.utils.utcnow().isoformat(timespec="seconds"),
+            )
+        elif not self.can_detect_member_presence():
+            presence_embed = discord.Embed(
+                title="Presenca dos avaliadores nao monitorada",
+                color=self.settings.embed_color,
+                timestamp=discord.utils.utcnow(),
+            )
+            presence_embed.description = (
+                "Nao vou marcar ninguem como offline porque esse bot nao esta lendo presenca em tempo real.\n"
+                "O horario do pedido foi registrado para medir a demanda."
+            )
+            presence_embed.add_field(
+                name="Avaliadores cadastrados",
+                value=str(len(evaluator_members)),
+                inline=True,
+            )
+            await ticket_channel.send(embed=presence_embed)
+            self.database.log_ticket_event(
+                ticket_id=ticket_id,
+                guild_id=guild.id,
+                channel_id=ticket_channel.id,
+                actor_id=None,
+                actor_tag=None,
+                event_type="grade_test_presence_unavailable",
+                details=discord.utils.utcnow().isoformat(timespec="seconds"),
+            )
+        elif not online_evaluators:
             no_evaluator_embed = discord.Embed(
                 title="Sem avaliador disponivel agora",
                 color=self.settings.embed_color,
