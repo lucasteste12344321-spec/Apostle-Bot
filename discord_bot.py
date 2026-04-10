@@ -86,21 +86,6 @@ def slugify_channel_name(value: str, *, fallback: str = "membro") -> str:
     return slug or fallback
 
 
-def is_report_ticket_channel(channel: discord.abc.GuildChannel | None) -> bool:
-    return isinstance(channel, discord.TextChannel) and bool(channel.topic and channel.topic.startswith("report_ticket:"))
-
-
-def parse_report_ticket_owner_id(channel: discord.TextChannel | None) -> int | None:
-    if not is_report_ticket_channel(channel):
-        return None
-
-    assert channel is not None
-    match = re.search(r"reporter_id=(\d+)", channel.topic or "")
-    if not match:
-        return None
-    return int(match.group(1))
-
-
 class ClanCog(commands.Cog):
     def __init__(self, bot: "ClanBot") -> None:
         self.bot = bot
@@ -562,48 +547,6 @@ class ClanCog(commands.Cog):
             f"Seu pedido de ajuda foi enviado em {target_channel.mention}.",
             ephemeral=True,
         )
-
-    @app_commands.command(name="fechar_ticket", description="Fecha o ticket de report atual.")
-    async def fechar_ticket(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
-            return
-
-        if not isinstance(interaction.channel, discord.TextChannel) or not is_report_ticket_channel(interaction.channel):
-            await interaction.response.send_message(
-                "Esse comando so pode ser usado dentro de um ticket de report.",
-                ephemeral=True,
-            )
-            return
-
-        member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
-        if member is None:
-            await interaction.response.send_message("Nao consegui identificar seu usuario no servidor.", ephemeral=True)
-            return
-
-        requester_id = parse_report_ticket_owner_id(interaction.channel)
-        can_close = bool(
-            member.id == requester_id
-            or member.guild_permissions.administrator
-            or member.id == interaction.guild.owner_id
-        )
-        if not can_close:
-            await interaction.response.send_message(
-                "So quem abriu o ticket ou um admin pode fechar esse canal.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message("Fechando o ticket em 3 segundos...", ephemeral=True)
-
-        log_embed = self.build_embed("Ticket de report fechado", color=discord.Color.orange())
-        log_embed.add_field(name="Canal", value=interaction.channel.name, inline=True)
-        log_embed.add_field(name="Fechado por", value=f"{member.mention} (`{member.id}`)", inline=True)
-        await self.emit_log(interaction.guild, log_embed)
-
-        await interaction.channel.send(f"Ticket fechado por {member.mention}.")
-        await asyncio.sleep(3)
-        await interaction.channel.delete(reason=f"Ticket fechado por {member}")
 
     @app_commands.command(name="reportar", description="Envia um report com prova para a staff.")
     @app_commands.describe(

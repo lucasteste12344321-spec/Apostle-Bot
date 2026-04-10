@@ -6,7 +6,7 @@ Bot de Discord em Python para:
 - registrar quem entrou e quem saiu do servidor
 - rastrear convites criados e quem entrou por cada convite
 - receber reports com embed pronto e prova em anexo
-- criar painel para membros escolherem se podem ajudar
+- criar painel persistente para membros escolherem se podem ajudar
 - abrir ticket privado quando alguem usar `/reportar`
 
 ## Requisitos
@@ -82,13 +82,14 @@ Depois que o bot entrar no servidor:
 2. Use `/painel_ajuda` para criar o painel de status de ajuda.
 3. Se quiser usar cargos ja existentes, use `/configurar_cargos_ajuda`.
 
+Depois que o painel for criado uma vez, o bot guarda a mensagem e reanexa os botoes apos reinicios e redeploys.
+
 ## Comandos
 
 - `/configurar_canais`
 - `/configurar_cargos_ajuda`
 - `/painel_ajuda`
 - `/pedir_ajuda`
-- `/fechar_ticket`
 - `/reportar`
 
 ## Onde os dados ficam salvos
@@ -110,5 +111,5 @@ Tabelas principais:
 - Para descobrir quem apagou mensagem de outra pessoa, o bot precisa da permissao `View Audit Log`.
 - Para rastrear convites, o bot precisa da permissao `Manage Server`.
 - Se o bot nao tiver `Manage Roles`, ele nao consegue criar ou trocar os cargos do sistema de ajuda.
-- Para abrir e fechar tickets de report, o bot precisa de `Manage Channels`.
+- Para abrir e fechar tickets de report pelo botao, o bot precisa de `Manage Channels`.
 - Se um token do bot for exposto em arquivo, log ou commit, gere um novo token no Discord Developer Portal imediatamente.
