@@ -482,7 +482,12 @@ class ClanCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        await interaction.channel.send(embed=embed, view=HelpAvailabilityView(self.bot))
+        panel_message = await interaction.channel.send(embed=embed, view=HelpAvailabilityView(self.bot))
+        self.bot.database.upsert_help_panel(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            message_id=panel_message.id,
+        )
         await interaction.followup.send("Painel enviado com sucesso.", ephemeral=True)
 
     @app_commands.command(name="pedir_ajuda", description="Envia um pedido de ajuda e marca quem esta disponivel.")
@@ -718,6 +723,14 @@ class ClanBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         self.add_view(self.help_view)
+        for panel in self.database.list_help_panels():
+            self.add_view(HelpAvailabilityView(self), message_id=panel["message_id"])
+            logger.info(
+                "Painel de ajuda reanexado | guild=%s channel=%s message=%s",
+                panel["guild_id"],
+                panel["channel_id"],
+                panel["message_id"],
+            )
         await self.add_cog(ClanCog(self))
 
         if self.settings.dev_guild_id:

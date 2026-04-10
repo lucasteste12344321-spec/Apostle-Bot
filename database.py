@@ -173,6 +173,13 @@ class Database:
                 notified_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS help_panels (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         self.connection.commit()
@@ -580,3 +587,38 @@ class Database:
             ),
         )
         self.connection.commit()
+
+    def upsert_help_panel(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO help_panels (
+                guild_id,
+                channel_id,
+                message_id,
+                updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                channel_id = excluded.channel_id,
+                message_id = excluded.message_id,
+                updated_at = excluded.updated_at
+            """,
+            (
+                guild_id,
+                channel_id,
+                message_id,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+
+    def list_help_panels(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT guild_id, channel_id, message_id, updated_at FROM help_panels"
+        ).fetchall()
+        return [dict(row) for row in rows]
