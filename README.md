@@ -10,6 +10,7 @@ Bot de Discord em Python para:
 - abrir painel de tickets para suporte, recrutamento, parceria e denuncia
 - abrir ticket de teste de grade com avaliador assumindo, notas e atribuicao de grade por botoes
 - abrir ticket de desafio de grade com arbitragem, liberacao do server, resultado e dodge
+- arquivar avaliacoes finalizadas em um canal proprio com embeds mais bonitas
 - aplicar warn, timeout, kick, ban e blacklist
 - registrar presenca do cla, ranking de ajuda e historicos
 - rodar automod basico, anti-raid e dashboard web simples
@@ -88,7 +89,7 @@ Observacoes importantes para Railway:
 
 Depois que o bot entrar no servidor:
 
-1. Use `/configurar_canais` para definir os canais de logs, reports e ajuda.
+1. Use `/configurar_canais` para definir os canais de logs, reports, ajuda e avaliacoes.
 2. Use `/painel_ajuda` para criar o painel de status de ajuda.
 3. Use `/painel_tickets` para criar o painel de atendimento e denuncias.
 4. Use `/painel_grades` para criar o painel competitivo de grades.
@@ -131,9 +132,12 @@ No `/painel_grades`, os botoes atuais incluem:
 - `/presencas`
 - `/historico_membro`
 - `/historico_reports`
+- `/historico_grade`
 - `/historico_convites`
 - `/mensagem_apagada`
 - `/ranking_ajuda`
+- `/meu_status`
+- `/estatisticas_tickets`
 - `/top_grades`
 - `/exportar_dados`
 
@@ -145,9 +149,9 @@ O painel de grades agora inclui dois fluxos competitivos:
   - verifica se o membro tem o cargo configurado em `CLAN_MEMBER_ROLE_ID`
   - abre ticket privado
   - avaliadores ou admins assumem o ticket
-  - avaliador registra notas
+  - avaliador registra notas em campos separados por skill
   - avaliador escolhe a grade final e o nivel `low/mid/high` por botoes
-  - o bot aplica os cargos e publica a avaliacao final no ticket
+  - o bot aplica os cargos, publica a avaliacao final no ticket e arquiva uma copia no canal de avaliacoes
   - se nao houver avaliador online no momento, o horario fica registrado no ticket
   - se o ticket nao for concluido em 1 hora, ele expira sem gerar cooldown de 7 dias
 
@@ -168,6 +172,7 @@ Observacoes:
 - Os subtieres `low/mid/high` seguem `GRADE_SUBTIER_ROLE_IDS` ou nomes em `GRADE_SUBTIER_LABELS`.
 - Se o cargo de arbitro tiver acento, o ideal e definir `REFEREE_ROLE_ID`.
 - Para saber quem esta `online/offline` de verdade entre os avaliadores, o bot precisaria do `Presence Intent`. Sem isso, ele registra a demanda sem afirmar quem estava offline.
+- Se o canal de avaliacoes nao for configurado, o bot usa o canal de logs como fallback para arquivar as fichas finais.
 
 ## Onde os dados ficam salvos
 

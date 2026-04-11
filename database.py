@@ -43,6 +43,12 @@ class Database:
     def close(self) -> None:
         self.connection.close()
 
+    def _ensure_column(self, table_name: str, column_name: str, definition: str) -> None:
+        rows = self.connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing = {row["name"] for row in rows}
+        if column_name not in existing:
+            self.connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
     def _create_tables(self) -> None:
         self.connection.executescript(
             """
@@ -51,6 +57,7 @@ class Database:
                 log_channel_id INTEGER,
                 report_channel_id INTEGER,
                 help_channel_id INTEGER,
+                evaluation_channel_id INTEGER,
                 available_role_id INTEGER,
                 unavailable_role_id INTEGER,
                 updated_at TEXT NOT NULL
@@ -323,6 +330,8 @@ class Database:
                 final_notes TEXT,
                 assigned_grade_role_id INTEGER,
                 assigned_grade_role_name TEXT,
+                assigned_subtier_role_id INTEGER,
+                assigned_subtier_role_name TEXT,
                 created_at TEXT NOT NULL,
                 completed_at TEXT,
                 FOREIGN KEY (ticket_id) REFERENCES tickets (id)
@@ -357,6 +366,9 @@ class Database:
             ON grade_challenges (guild_id, challenger_id, challenged_id, created_at);
             """
         )
+        self._ensure_column("guild_settings", "evaluation_channel_id", "INTEGER")
+        self._ensure_column("grade_assessments", "assigned_subtier_role_id", "INTEGER")
+        self._ensure_column("grade_assessments", "assigned_subtier_role_name", "TEXT")
         self.connection.commit()
 
     def get_guild_settings(self, guild_id: int) -> dict[str, Any] | None:
@@ -375,6 +387,7 @@ class Database:
             "log_channel_id": None,
             "report_channel_id": None,
             "help_channel_id": None,
+            "evaluation_channel_id": None,
             "available_role_id": None,
             "unavailable_role_id": None,
             "updated_at": utcnow_iso(),
@@ -389,14 +402,16 @@ class Database:
                 log_channel_id,
                 report_channel_id,
                 help_channel_id,
+                evaluation_channel_id,
                 available_role_id,
                 unavailable_role_id,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id) DO UPDATE SET
                 log_channel_id = excluded.log_channel_id,
                 report_channel_id = excluded.report_channel_id,
                 help_channel_id = excluded.help_channel_id,
+                evaluation_channel_id = excluded.evaluation_channel_id,
                 available_role_id = excluded.available_role_id,
                 unavailable_role_id = excluded.unavailable_role_id,
                 updated_at = excluded.updated_at
@@ -406,6 +421,7 @@ class Database:
                 current["log_channel_id"],
                 current["report_channel_id"],
                 current["help_channel_id"],
+                current["evaluation_channel_id"],
                 current["available_role_id"],
                 current["unavailable_role_id"],
                 current["updated_at"],
@@ -1382,6 +1398,58 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_ticket_statistics(self, guild_id: int) -> dict[str, Any]:
+        total_created = self.connection.execute(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        active_now = self.connection.execute(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id = ? AND status != 'fechado'",
+            (guild_id,),
+        ).fetchone()[0]
+        closed_total = self.connection.execute(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id = ? AND status = 'fechado'",
+            (guild_id,),
+        ).fetchone()[0]
+        resolved_total = self.connection.execute(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id = ? AND status = 'resolvido'",
+            (guild_id,),
+        ).fetchone()[0]
+
+        by_type_rows = self.connection.execute(
+            """
+            SELECT
+                ticket_type,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status != 'fechado' THEN 1 ELSE 0 END) AS active
+            FROM tickets
+            WHERE guild_id = ?
+            GROUP BY ticket_type
+            ORDER BY total DESC, ticket_type ASC
+            """,
+            (guild_id,),
+        ).fetchall()
+
+        by_status_rows = self.connection.execute(
+            """
+            SELECT status, COUNT(*) AS total
+            FROM tickets
+            WHERE guild_id = ?
+            GROUP BY status
+            ORDER BY total DESC, status ASC
+            """,
+            (guild_id,),
+        ).fetchall()
+
+        return {
+            "total_created": total_created,
+            "active_now": active_now,
+            "closed_total": closed_total,
+            "resolved_total": resolved_total,
+            "by_type": [dict(row) for row in by_type_rows],
+            "by_status": [dict(row) for row in by_status_rows],
+        }
+
     def get_dashboard_stats(self, guild_id: int) -> dict[str, Any]:
         messages = self.connection.execute(
             "SELECT COUNT(*) FROM messages WHERE guild_id = ?",
@@ -1636,6 +1704,8 @@ class Database:
         final_notes: str,
         assigned_grade_role_id: int,
         assigned_grade_role_name: str,
+        assigned_subtier_role_id: int | None = None,
+        assigned_subtier_role_name: str | None = None,
     ) -> None:
         self.connection.execute(
             """
@@ -1649,6 +1719,8 @@ class Database:
                 final_notes = ?,
                 assigned_grade_role_id = ?,
                 assigned_grade_role_name = ?,
+                assigned_subtier_role_id = ?,
+                assigned_subtier_role_name = ?,
                 completed_at = ?
             WHERE ticket_id = ?
             """,
@@ -1662,11 +1734,40 @@ class Database:
                 final_notes,
                 assigned_grade_role_id,
                 assigned_grade_role_name,
+                assigned_subtier_role_id,
+                assigned_subtier_role_name,
                 utcnow_iso(),
                 ticket_id,
             ),
         )
         self.connection.commit()
+
+    def list_recent_grade_assessments(
+        self,
+        guild_id: int,
+        *,
+        member_id: int | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        conditions = ["guild_id = ?"]
+        params: list[Any] = [guild_id]
+
+        if member_id is not None:
+            conditions.append("member_id = ?")
+            params.append(member_id)
+
+        params.append(limit)
+        rows = self.connection.execute(
+            f"""
+            SELECT *
+            FROM grade_assessments
+            WHERE {' AND '.join(conditions)}
+            ORDER BY COALESCE(completed_at, created_at) DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def create_grade_challenge(
         self,

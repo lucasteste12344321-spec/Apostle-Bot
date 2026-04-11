@@ -143,6 +143,22 @@ def parse_basic_skill_notes(raw_value: str | None) -> dict[str, str]:
     return results
 
 
+def format_discord_timestamp(value: str | None, style: str = "f") -> str:
+    parsed = parse_iso_datetime(value)
+    if parsed is None:
+        return "Sem registro"
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return discord.utils.format_dt(parsed, style=style)
+
+
+def format_grade_result_label(grade_name: str | None, subtier_name: str | None) -> str:
+    if grade_name and subtier_name:
+        return f"{grade_name} | {subtier_name}"
+    return grade_name or subtier_name or "Nao definido"
+
+
 def ticket_type_label(ticket_type: str) -> str:
     return {
         "report": "Denuncia",
@@ -566,6 +582,7 @@ class ClanCog(commands.Cog):
         logs="Canal que vai receber os logs do servidor.",
         reports="Canal que vai receber os reports.",
         ajuda="Canal que vai receber os pedidos de ajuda.",
+        avaliacoes="Canal que vai guardar o historico das avaliacoes de grade.",
     )
     async def configurar_canais(
         self,
@@ -573,12 +590,13 @@ class ClanCog(commands.Cog):
         logs: discord.TextChannel | None = None,
         reports: discord.TextChannel | None = None,
         ajuda: discord.TextChannel | None = None,
+        avaliacoes: discord.TextChannel | None = None,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
             return
 
-        if logs is None and reports is None and ajuda is None:
+        if logs is None and reports is None and ajuda is None and avaliacoes is None:
             await interaction.response.send_message("Informe pelo menos um canal para atualizar.", ephemeral=True)
             return
 
@@ -589,6 +607,8 @@ class ClanCog(commands.Cog):
             payload["report_channel_id"] = reports.id
         if ajuda is not None:
             payload["help_channel_id"] = ajuda.id
+        if avaliacoes is not None:
+            payload["evaluation_channel_id"] = avaliacoes.id
 
         self.bot.database.upsert_guild_settings(interaction.guild.id, **payload)
 
@@ -599,6 +619,8 @@ class ClanCog(commands.Cog):
             lines.append(f"Reports: {reports.mention}")
         if ajuda is not None:
             lines.append(f"Ajuda: {ajuda.mention}")
+        if avaliacoes is not None:
+            lines.append(f"Avaliacoes: {avaliacoes.mention}")
 
         await interaction.response.send_message("Configuracao salva.\n" + "\n".join(lines), ephemeral=True)
 
@@ -1204,6 +1226,67 @@ class ClanCog(commands.Cog):
             embed.add_field(name="Reports relacionados", value="\n".join(lines), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="historico_grade", description="Mostra o historico recente de avaliacoes de grade.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def historico_grade(self, interaction: discord.Interaction, usuario: discord.Member) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        profile = self.bot.database.get_grade_profile(interaction.guild.id, usuario.id)
+        assessments = self.bot.database.list_recent_grade_assessments(
+            interaction.guild.id,
+            member_id=usuario.id,
+            limit=5,
+        )
+        current_grade = self.bot.get_member_grade_role(usuario)
+        current_subtier = self.bot.get_member_grade_subtier_role(usuario)
+
+        embed = self.build_embed("Historico de grade", color=discord.Color.dark_gold())
+        embed.description = "Resumo das ultimas avaliacoes concluidas e do estado competitivo atual."
+        embed.add_field(name="Jogador", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
+        embed.add_field(
+            name="Grade atual",
+            value=format_grade_result_label(
+                current_grade.mention if current_grade else None,
+                current_subtier.mention if current_subtier else None,
+            ),
+            inline=True,
+        )
+        embed.add_field(name="Dodges", value=str(profile["dodge_count"]) if profile else "0", inline=True)
+        embed.add_field(
+            name="Ultimo teste concluido",
+            value=format_discord_timestamp(profile.get("last_assessment_at") if profile else None, "f"),
+            inline=True,
+        )
+        embed.add_field(
+            name="Ultimo desafio",
+            value=format_discord_timestamp(profile.get("last_challenge_at") if profile else None, "f"),
+            inline=True,
+        )
+
+        if not assessments:
+            embed.add_field(name="Avaliacoes", value="Nenhuma avaliacao registrada ainda.", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        for index, row in enumerate(assessments, start=1):
+            result_label = format_grade_result_label(
+                row.get("assigned_grade_role_name"),
+                row.get("assigned_subtier_role_name"),
+            )
+            value = "\n".join(
+                [
+                    f"**Resultado:** {result_label}",
+                    f"**Avaliador:** {row.get('evaluator_tag') or 'Nao definido'}",
+                    f"**Quando:** {format_discord_timestamp(row.get('completed_at') or row.get('created_at'), 'f')}",
+                    f"**Parecer:** {trim_text(row.get('final_notes'), 220)}",
+                ]
+            )
+            embed.add_field(name=f"Avaliacao {index}", value=trim_text(value, 1024), inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @app_commands.command(name="historico_reports", description="Lista reports recentes.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def historico_reports(self, interaction: discord.Interaction) -> None:
@@ -1285,6 +1368,93 @@ class ClanCog(commands.Cog):
             for index, row in enumerate(rows, start=1)
         )
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="meu_status", description="Mostra seu status atual no sistema de grades.")
+    async def meu_status(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        profile = self.bot.database.get_grade_profile(guild.id, member.id)
+        current_grade = self.bot.get_member_grade_role(member)
+        current_subtier = self.bot.get_member_grade_subtier_role(member)
+
+        next_test_text = "Disponivel agora"
+        if profile and profile.get("last_assessment_at"):
+            last_assessment = parse_iso_datetime(profile["last_assessment_at"])
+            if last_assessment is not None:
+                if last_assessment.tzinfo is None:
+                    last_assessment = last_assessment.replace(tzinfo=timezone.utc)
+                next_allowed = last_assessment + timedelta(days=7)
+                if next_allowed > discord.utils.utcnow():
+                    next_test_text = f"{discord.utils.format_dt(next_allowed, 'R')} ({discord.utils.format_dt(next_allowed, 'f')})"
+
+        embed = self.build_embed("Seu status competitivo", color=discord.Color.blurple())
+        embed.description = "Resumo rapido da sua ficha no sistema de grades."
+        embed.add_field(
+            name="Grade atual",
+            value=format_grade_result_label(
+                current_grade.mention if current_grade else None,
+                current_subtier.mention if current_subtier else None,
+            ),
+            inline=True,
+        )
+        embed.add_field(name="Dodges", value=str(profile["dodge_count"]) if profile else "0", inline=True)
+        embed.add_field(name="Pode pedir teste", value=next_test_text, inline=True)
+        embed.add_field(
+            name="Ultimo teste concluido",
+            value=format_discord_timestamp(profile.get("last_assessment_at") if profile else None, "f"),
+            inline=True,
+        )
+        embed.add_field(
+            name="Ultimo desafio",
+            value=format_discord_timestamp(profile.get("last_challenge_at") if profile else None, "f"),
+            inline=True,
+        )
+        archive_channel = self.bot.get_evaluation_archive_channel(guild)
+        embed.add_field(
+            name="Arquivo de avaliacoes",
+            value=archive_channel.mention if archive_channel else "Usando fallback do canal de logs ou ainda nao configurado.",
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="estatisticas_tickets", description="Mostra quantos tickets ja foram abertos no servidor.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def estatisticas_tickets(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        stats = self.bot.database.get_ticket_statistics(interaction.guild.id)
+        if not stats["total_created"]:
+            await interaction.response.send_message("Nenhum ticket foi registrado ainda.", ephemeral=True)
+            return
+
+        embed = self.build_embed("Estatisticas de tickets", color=discord.Color.dark_blue())
+        embed.description = "Visao geral da demanda registrada no servidor."
+        embed.add_field(name="Total ja aberto", value=str(stats["total_created"]), inline=True)
+        embed.add_field(name="Ativos agora", value=str(stats["active_now"]), inline=True)
+        embed.add_field(name="Fechados", value=str(stats["closed_total"]), inline=True)
+        embed.add_field(name="Resolvidos", value=str(stats["resolved_total"]), inline=True)
+
+        if stats["by_type"]:
+            type_lines = []
+            for row in stats["by_type"]:
+                type_lines.append(
+                    f"**{ticket_type_label(row['ticket_type'])}:** {row['total']} total | {row['active']} ativo(s)"
+                )
+            embed.add_field(name="Por tipo", value="\n".join(type_lines), inline=False)
+
+        if stats["by_status"]:
+            status_lines = []
+            for row in stats["by_status"]:
+                status_lines.append(f"**{ticket_status_label(row['status'])}:** {row['total']}")
+            embed.add_field(name="Por status", value="\n".join(status_lines), inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="top_grades", description="Mostra o top 20 jogadores por grade do servidor.")
     async def top_grades(self, interaction: discord.Interaction) -> None:
@@ -1426,6 +1596,7 @@ class ClanBot(commands.Bot):
             "log_channel_id": stored.get("log_channel_id") or self.settings.default_log_channel_id,
             "report_channel_id": stored.get("report_channel_id") or self.settings.default_report_channel_id,
             "help_channel_id": stored.get("help_channel_id") or self.settings.default_help_channel_id,
+            "evaluation_channel_id": stored.get("evaluation_channel_id"),
             "available_role_id": stored.get("available_role_id"),
             "unavailable_role_id": stored.get("unavailable_role_id"),
         }
@@ -1445,6 +1616,11 @@ class ClanBot(commands.Bot):
         channel = guild.get_channel(channel_id) if channel_id else None
         return channel if isinstance(channel, discord.TextChannel) else None
 
+    def get_evaluation_archive_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
+        channel_id = self.get_guild_settings(guild.id)["evaluation_channel_id"]
+        channel = guild.get_channel(channel_id) if channel_id else self.get_log_channel(guild)
+        return channel if isinstance(channel, discord.TextChannel) else None
+
     def get_feature_settings(self, guild_id: int) -> dict[str, Any]:
         stored = self.database.get_feature_settings(guild_id) or {}
         return {
@@ -1458,6 +1634,82 @@ class ClanBot(commands.Bot):
     def get_help_notify_role(self, guild: discord.Guild) -> discord.Role | None:
         role_id = self.get_feature_settings(guild.id)["help_notify_role_id"]
         return guild.get_role(role_id) if role_id else None
+
+    def build_grade_evaluation_embed(
+        self,
+        *,
+        title: str,
+        member: discord.Member,
+        evaluator: discord.Member,
+        basics_notes: str | None,
+        combo_notes: str | None,
+        adaptation_notes: str | None,
+        game_sense_notes: str | None,
+        final_notes: str | None,
+        color: discord.Color | int,
+        grade_role: discord.Role | None = None,
+        subtier_role: discord.Role | None = None,
+        result_label: str | None = None,
+        ticket_channel: discord.TextChannel | None = None,
+        recorded_at: str | None = None,
+        footer_text: str | None = None,
+    ) -> discord.Embed:
+        basic_skills = parse_basic_skill_notes(basics_notes)
+        embed = discord.Embed(
+            title=title,
+            color=color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.description = "Resumo tecnico organizado do teste de grade."
+        embed.add_field(name="Jogador", value=f"{member.mention}\n`{member.id}`", inline=True)
+        embed.add_field(name="Avaliador", value=f"{evaluator.mention}\n`{evaluator.id}`", inline=True)
+        embed.add_field(
+            name="Resultado",
+            value=result_label
+            or format_grade_result_label(
+                grade_role.mention if grade_role else None,
+                subtier_role.mention if subtier_role else None,
+            ),
+            inline=True,
+        )
+
+        if ticket_channel is not None:
+            embed.add_field(name="Ticket", value=ticket_channel.mention, inline=True)
+        if recorded_at:
+            embed.add_field(name="Registrado em", value=format_discord_timestamp(recorded_at, "f"), inline=True)
+
+        fundamentals_lines = [
+            f"**Block:** {trim_text(basic_skills.get('Block'), 180)}",
+            f"**M1 Trading:** {trim_text(basic_skills.get('M1 Trading'), 180)}",
+            f"**Side Dash:** {trim_text(basic_skills.get('Side Dash'), 180)}",
+            f"**Front Dash:** {trim_text(basic_skills.get('Front Dash'), 180)}",
+            f"**M1 Catch:** {trim_text(basic_skills.get('M1 Catch'), 180)}",
+            f"**Evasiva:** {trim_text(basic_skills.get('Evasiva'), 180)}",
+        ]
+        embed.add_field(
+            name="Fundamentos",
+            value=trim_text("\n".join(fundamentals_lines), 1024),
+            inline=False,
+        )
+        embed.add_field(
+            name="Leitura e execucao",
+            value=trim_text(
+                "\n".join(
+                    [
+                        f"**Combo:** {combo_notes or '(sem observacoes)'}",
+                        f"**Adaptacao:** {adaptation_notes or '(sem observacoes)'}",
+                        f"**Nocao de jogo:** {game_sense_notes or '(sem observacoes)'}",
+                    ]
+                ),
+                1024,
+            ),
+            inline=False,
+        )
+        embed.add_field(name="Parecer final", value=trim_text(final_notes, 1024), inline=False)
+        if member.display_avatar:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=footer_text or "Apostle Bot | Sistema de grades")
+        return embed
 
     def can_manage_tickets(self, member: discord.Member) -> bool:
         return bool(member.guild_permissions.administrator or member.guild_permissions.manage_guild)
@@ -2209,23 +2461,29 @@ class ClanBot(commands.Bot):
             details=final_notes,
         )
 
-        embed = discord.Embed(
-            title="Avaliacao registrada",
-            color=self.settings.embed_color,
-            timestamp=discord.utils.utcnow(),
+        target_member = guild.get_member(ticket["creator_id"])
+        if target_member is None:
+            await interaction.response.send_message(
+                "Nao encontrei o membro avaliado para montar a ficha da avaliacao.",
+                ephemeral=True,
+            )
+            return
+
+        embed = self.build_grade_evaluation_embed(
+            title="Avaliacao tecnica registrada",
+            member=target_member,
+            evaluator=member,
+            basics_notes=basics_notes,
+            combo_notes=combo_notes,
+            adaptation_notes=adaptation_notes,
+            game_sense_notes=game_sense_notes,
+            final_notes=final_notes,
+            color=discord.Color.orange(),
+            result_label="Aguardando definicao da grade final",
+            ticket_channel=channel,
+            recorded_at=assessment.get("created_at") if assessment else None,
+            footer_text="Agora escolha a grade final nos botoes do ticket.",
         )
-        embed.add_field(name="Avaliador", value=member.mention, inline=False)
-        embed.add_field(name="Block", value=trim_text(pending_basics["block"], 1024), inline=True)
-        embed.add_field(name="M1 Trading", value=trim_text(pending_basics["m1_trading"], 1024), inline=True)
-        embed.add_field(name="Side Dash", value=trim_text(pending_basics["side_dash"], 1024), inline=True)
-        embed.add_field(name="Front Dash", value=trim_text(pending_basics["front_dash"], 1024), inline=True)
-        embed.add_field(name="M1 Catch", value=trim_text(pending_basics["m1_catch"], 1024), inline=True)
-        embed.add_field(name="Evasiva", value=trim_text(evasiva_notes, 1024), inline=True)
-        embed.add_field(name="Combo", value=trim_text(combo_notes, 1024), inline=False)
-        embed.add_field(name="Adaptacao", value=trim_text(adaptation_notes, 1024), inline=False)
-        embed.add_field(name="Nocao de jogo", value=trim_text(game_sense_notes, 1024), inline=False)
-        embed.add_field(name="Avaliacao final", value=trim_text(final_notes, 1024), inline=False)
-        embed.set_footer(text="Agora escolha a grade final em um dos botoes do ticket.")
 
         await interaction.response.send_message(
             "Avaliacao registrada. Agora escolha a grade final nos botoes do ticket.",
@@ -2316,6 +2574,8 @@ class ClanBot(commands.Bot):
             final_notes=assessment.get("final_notes") or "",
             assigned_grade_role_id=selected_role.id,
             assigned_grade_role_name=selected_role.name,
+            assigned_subtier_role_id=selected_subtier_role.id,
+            assigned_subtier_role_name=selected_subtier_role.name,
         )
         self.database.upsert_grade_profile(
             guild_id=guild.id,
@@ -2337,24 +2597,46 @@ class ClanBot(commands.Bot):
             details=selected_role.name,
         )
 
-        result_embed = discord.Embed(
+        result_embed = self.build_grade_evaluation_embed(
             title="Avaliacao final de grade",
-            color=self.settings.embed_color,
-            timestamp=discord.utils.utcnow(),
+            member=target_member,
+            evaluator=member,
+            basics_notes=assessment.get("basics_notes"),
+            combo_notes=assessment.get("combo_notes"),
+            adaptation_notes=assessment.get("adaptation_notes"),
+            game_sense_notes=assessment.get("game_sense_notes"),
+            final_notes=assessment.get("final_notes"),
+            color=discord.Color.teal(),
+            grade_role=selected_role,
+            subtier_role=selected_subtier_role,
+            ticket_channel=channel,
+            recorded_at=now_iso,
+            footer_text="Resultado final aplicado automaticamente pelo sistema de grades.",
         )
-        basic_skills = parse_basic_skill_notes(assessment.get("basics_notes"))
-        result_embed.add_field(name="Membro", value=target_member.mention, inline=False)
-        result_embed.add_field(name="Avaliador", value=member.mention, inline=False)
-        result_embed.add_field(name="Grade recebida", value=f"{selected_role.mention} | {selected_subtier_role.mention}", inline=False)
-        for field_name in ("Block", "M1 Trading", "Side Dash", "Front Dash", "M1 Catch", "Evasiva"):
-            if field_name in basic_skills:
-                result_embed.add_field(name=field_name, value=trim_text(basic_skills[field_name], 1024), inline=True)
-        result_embed.add_field(name="Combo", value=trim_text(assessment.get("combo_notes"), 1024), inline=False)
-        result_embed.add_field(name="Adaptacao", value=trim_text(assessment.get("adaptation_notes"), 1024), inline=False)
-        result_embed.add_field(name="Nocao de jogo", value=trim_text(assessment.get("game_sense_notes"), 1024), inline=False)
-        result_embed.add_field(name="Avaliacao final", value=trim_text(assessment.get("final_notes"), 1024), inline=False)
 
         await channel.send(content=target_member.mention, embed=result_embed)
+        archive_channel = self.get_evaluation_archive_channel(guild)
+        if archive_channel is not None and archive_channel.id != channel.id:
+            archive_embed = self.build_grade_evaluation_embed(
+                title="Arquivo de avaliacao de grade",
+                member=target_member,
+                evaluator=member,
+                basics_notes=assessment.get("basics_notes"),
+                combo_notes=assessment.get("combo_notes"),
+                adaptation_notes=assessment.get("adaptation_notes"),
+                game_sense_notes=assessment.get("game_sense_notes"),
+                final_notes=assessment.get("final_notes"),
+                color=discord.Color.dark_teal(),
+                grade_role=selected_role,
+                subtier_role=selected_subtier_role,
+                ticket_channel=channel,
+                recorded_at=now_iso,
+                footer_text="Historico permanente das avaliacoes finalizadas.",
+            )
+            try:
+                await archive_channel.send(embed=archive_embed)
+            except discord.HTTPException:
+                logger.exception("Falha ao arquivar avaliacao de grade em %s", guild.name)
         await interaction.followup.send(
             f"Grade {selected_role.mention} | {selected_subtier_role.mention} aplicada com sucesso em {target_member.mention}.",
             ephemeral=True,
