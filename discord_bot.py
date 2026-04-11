@@ -130,6 +130,19 @@ def parse_iso_datetime(value: str | None) -> datetime | None:
         return None
 
 
+def parse_basic_skill_notes(raw_value: str | None) -> dict[str, str]:
+    if not raw_value:
+        return {}
+
+    results: dict[str, str] = {}
+    for line in raw_value.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        results[key.strip()] = value.strip()
+    return results
+
+
 def ticket_type_label(ticket_type: str) -> str:
     return {
         "report": "Denuncia",
@@ -1360,6 +1373,7 @@ class ClanBot(commands.Bot):
         self.recent_messages: dict[tuple[int, int], deque[datetime]] = defaultdict(lambda: deque(maxlen=8))
         self.recent_joins: dict[int, deque[datetime]] = defaultdict(deque)
         self.recent_raid_alerts: dict[int, datetime] = {}
+        self.pending_grade_evaluations: dict[tuple[int, int], dict[str, str]] = {}
         self.dashboard_runner: Any = None
         self.ticket_timeout_task: asyncio.Task[None] | None = None
 
@@ -1655,6 +1669,12 @@ class ClanBot(commands.Bot):
             "- com 3 dodges, desce uma grade"
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    def get_pending_grade_evaluation(self, channel_id: int, evaluator_id: int) -> dict[str, str] | None:
+        return self.pending_grade_evaluations.get((channel_id, evaluator_id))
+
+    def pop_pending_grade_evaluation(self, channel_id: int, evaluator_id: int) -> dict[str, str] | None:
+        return self.pending_grade_evaluations.pop((channel_id, evaluator_id), None)
 
     async def create_private_ticket_channel(
         self,
@@ -2113,7 +2133,7 @@ class ClanBot(commands.Bot):
         self,
         interaction: discord.Interaction,
         *,
-        basics_notes: str,
+        evasiva_notes: str,
         combo_notes: str,
         adaptation_notes: str,
         game_sense_notes: str,
@@ -2139,6 +2159,14 @@ class ClanBot(commands.Bot):
             await interaction.response.send_message("Esse teste foi assumido por outro avaliador.", ephemeral=True)
             return
 
+        pending_basics = self.pop_pending_grade_evaluation(channel.id, member.id)
+        if pending_basics is None:
+            await interaction.response.send_message(
+                "A primeira parte da avaliacao nao foi encontrada. Clique em `Registrar avaliacao` de novo.",
+                ephemeral=True,
+            )
+            return
+
         assessment = self.database.get_grade_assessment_by_ticket(ticket["id"])
         if assessment is None:
             self.database.create_grade_assessment(
@@ -2150,6 +2178,16 @@ class ClanBot(commands.Bot):
                 evaluator_tag=str(member),
             )
 
+        basics_notes = "\n".join(
+            [
+                f"Block: {pending_basics['block']}",
+                f"M1 Trading: {pending_basics['m1_trading']}",
+                f"Side Dash: {pending_basics['side_dash']}",
+                f"Front Dash: {pending_basics['front_dash']}",
+                f"M1 Catch: {pending_basics['m1_catch']}",
+                f"Evasiva: {evasiva_notes}",
+            ]
+        )
         self.database.save_grade_assessment_notes(
             ticket_id=ticket["id"],
             evaluator_id=member.id,
@@ -2177,7 +2215,12 @@ class ClanBot(commands.Bot):
             timestamp=discord.utils.utcnow(),
         )
         embed.add_field(name="Avaliador", value=member.mention, inline=False)
-        embed.add_field(name="Skills basicas", value=trim_text(basics_notes, 1024), inline=False)
+        embed.add_field(name="Block", value=trim_text(pending_basics["block"], 1024), inline=True)
+        embed.add_field(name="M1 Trading", value=trim_text(pending_basics["m1_trading"], 1024), inline=True)
+        embed.add_field(name="Side Dash", value=trim_text(pending_basics["side_dash"], 1024), inline=True)
+        embed.add_field(name="Front Dash", value=trim_text(pending_basics["front_dash"], 1024), inline=True)
+        embed.add_field(name="M1 Catch", value=trim_text(pending_basics["m1_catch"], 1024), inline=True)
+        embed.add_field(name="Evasiva", value=trim_text(evasiva_notes, 1024), inline=True)
         embed.add_field(name="Combo", value=trim_text(combo_notes, 1024), inline=False)
         embed.add_field(name="Adaptacao", value=trim_text(adaptation_notes, 1024), inline=False)
         embed.add_field(name="Nocao de jogo", value=trim_text(game_sense_notes, 1024), inline=False)
@@ -2299,10 +2342,13 @@ class ClanBot(commands.Bot):
             color=self.settings.embed_color,
             timestamp=discord.utils.utcnow(),
         )
+        basic_skills = parse_basic_skill_notes(assessment.get("basics_notes"))
         result_embed.add_field(name="Membro", value=target_member.mention, inline=False)
         result_embed.add_field(name="Avaliador", value=member.mention, inline=False)
         result_embed.add_field(name="Grade recebida", value=f"{selected_role.mention} | {selected_subtier_role.mention}", inline=False)
-        result_embed.add_field(name="Skills basicas", value=trim_text(assessment.get("basics_notes"), 1024), inline=False)
+        for field_name in ("Block", "M1 Trading", "Side Dash", "Front Dash", "M1 Catch", "Evasiva"):
+            if field_name in basic_skills:
+                result_embed.add_field(name=field_name, value=trim_text(basic_skills[field_name], 1024), inline=True)
         result_embed.add_field(name="Combo", value=trim_text(assessment.get("combo_notes"), 1024), inline=False)
         result_embed.add_field(name="Adaptacao", value=trim_text(assessment.get("adaptation_notes"), 1024), inline=False)
         result_embed.add_field(name="Nocao de jogo", value=trim_text(assessment.get("game_sense_notes"), 1024), inline=False)

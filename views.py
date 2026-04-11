@@ -356,13 +356,62 @@ class GradeChallengeRequestModal(discord.ui.Modal):
 
 class GradeEvaluationModal(discord.ui.Modal):
     def __init__(self, bot: "ClanBot") -> None:
-        super().__init__(title="Registrar avaliacao")
+        super().__init__(title="Avaliacao 1/2")
         self.bot = bot
-        self.basics = discord.ui.TextInput(
-            label="Skills basicas",
-            placeholder="block, m1 trading, side dash, front dash, m1 catch, evasiva",
-            max_length=300,
+        self.block = discord.ui.TextInput(label="Block", max_length=200)
+        self.m1_trading = discord.ui.TextInput(label="M1 Trading", max_length=200)
+        self.side_dash = discord.ui.TextInput(label="Side Dash", max_length=200)
+        self.front_dash = discord.ui.TextInput(label="Front Dash", max_length=200)
+        self.m1_catch = discord.ui.TextInput(label="M1 Catch", max_length=200)
+        self.add_item(self.block)
+        self.add_item(self.m1_trading)
+        self.add_item(self.side_dash)
+        self.add_item(self.front_dash)
+        self.add_item(self.m1_catch)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse modal so funciona dentro do ticket de teste.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.bot.can_manage_grade_tests(member):
+            await interaction.response.send_message("So avaliadores ou admins podem registrar a avaliacao.", ephemeral=True)
+            return
+
+        ticket = self.bot.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "grade_test":
+            await interaction.response.send_message("Esse canal nao e um ticket de teste de grade.", ephemeral=True)
+            return
+
+        self.bot.pending_grade_evaluations[(channel.id, member.id)] = {
+            "block": self.block.value,
+            "m1_trading": self.m1_trading.value,
+            "side_dash": self.side_dash.value,
+            "front_dash": self.front_dash.value,
+            "m1_catch": self.m1_catch.value,
+        }
+        await interaction.response.send_message(
+            "Parte 1 salva. Clique no botao abaixo para abrir a parte 2 da avaliacao.",
+            view=GradeEvaluationContinueView(self.bot),
+            ephemeral=True,
         )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.exception("Erro ao registrar avaliacao 1/2", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Nao consegui registrar a primeira parte da avaliacao.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nao consegui registrar a primeira parte da avaliacao.", ephemeral=True)
+
+
+class GradeEvaluationFinalModal(discord.ui.Modal):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(title="Avaliacao 2/2")
+        self.bot = bot
+        self.evasiva = discord.ui.TextInput(label="Evasiva", max_length=200)
         self.combo = discord.ui.TextInput(label="Combo", max_length=200)
         self.adaptation = discord.ui.TextInput(label="Adaptacao", max_length=200)
         self.game_sense = discord.ui.TextInput(label="Nocao de jogo", max_length=200)
@@ -371,7 +420,7 @@ class GradeEvaluationModal(discord.ui.Modal):
             style=discord.TextStyle.paragraph,
             max_length=1200,
         )
-        self.add_item(self.basics)
+        self.add_item(self.evasiva)
         self.add_item(self.combo)
         self.add_item(self.adaptation)
         self.add_item(self.game_sense)
@@ -380,7 +429,7 @@ class GradeEvaluationModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.bot.submit_grade_evaluation_notes(
             interaction,
-            basics_notes=self.basics.value,
+            evasiva_notes=self.evasiva.value,
             combo_notes=self.combo.value,
             adaptation_notes=self.adaptation.value,
             game_sense_notes=self.game_sense.value,
@@ -388,11 +437,26 @@ class GradeEvaluationModal(discord.ui.Modal):
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        logger.exception("Erro ao registrar avaliacao", exc_info=error)
+        logger.exception("Erro ao registrar avaliacao 2/2", exc_info=error)
         if interaction.response.is_done():
-            await interaction.followup.send("Nao consegui registrar a avaliacao agora.", ephemeral=True)
+            await interaction.followup.send("Nao consegui registrar a segunda parte da avaliacao.", ephemeral=True)
         else:
-            await interaction.response.send_message("Nao consegui registrar a avaliacao agora.", ephemeral=True)
+            await interaction.response.send_message("Nao consegui registrar a segunda parte da avaliacao.", ephemeral=True)
+
+
+class GradeEvaluationContinueView(discord.ui.View):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(timeout=300)
+        self.bot = bot
+
+    @discord.ui.button(label="Continuar avaliacao", style=discord.ButtonStyle.success)
+    async def continue_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await interaction.response.send_modal(GradeEvaluationFinalModal(self.bot))
 
 
 class GradeTestTicketView(discord.ui.View):
