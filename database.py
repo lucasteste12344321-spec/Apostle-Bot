@@ -58,6 +58,7 @@ class Database:
                 report_channel_id INTEGER,
                 help_channel_id INTEGER,
                 evaluation_channel_id INTEGER,
+                watch_channel_id INTEGER,
                 available_role_id INTEGER,
                 unavailable_role_id INTEGER,
                 updated_at TEXT NOT NULL
@@ -276,6 +277,17 @@ class Database:
                 PRIMARY KEY (guild_id, user_id)
             );
 
+            CREATE TABLE IF NOT EXISTS watchlist_entries (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_tag TEXT NOT NULL,
+                actor_id INTEGER,
+                actor_tag TEXT,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            );
+
             CREATE TABLE IF NOT EXISTS presence_status (
                 guild_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
@@ -454,6 +466,7 @@ class Database:
             """
         )
         self._ensure_column("guild_settings", "evaluation_channel_id", "INTEGER")
+        self._ensure_column("guild_settings", "watch_channel_id", "INTEGER")
         self._ensure_column("grade_assessments", "assigned_subtier_role_id", "INTEGER")
         self._ensure_column("grade_assessments", "assigned_subtier_role_name", "TEXT")
         self.connection.commit()
@@ -475,6 +488,7 @@ class Database:
             "report_channel_id": None,
             "help_channel_id": None,
             "evaluation_channel_id": None,
+            "watch_channel_id": None,
             "available_role_id": None,
             "unavailable_role_id": None,
             "updated_at": utcnow_iso(),
@@ -490,15 +504,17 @@ class Database:
                 report_channel_id,
                 help_channel_id,
                 evaluation_channel_id,
+                watch_channel_id,
                 available_role_id,
                 unavailable_role_id,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id) DO UPDATE SET
                 log_channel_id = excluded.log_channel_id,
                 report_channel_id = excluded.report_channel_id,
                 help_channel_id = excluded.help_channel_id,
                 evaluation_channel_id = excluded.evaluation_channel_id,
+                watch_channel_id = excluded.watch_channel_id,
                 available_role_id = excluded.available_role_id,
                 unavailable_role_id = excluded.unavailable_role_id,
                 updated_at = excluded.updated_at
@@ -509,6 +525,7 @@ class Database:
                 current["report_channel_id"],
                 current["help_channel_id"],
                 current["evaluation_channel_id"],
+                current["watch_channel_id"],
                 current["available_role_id"],
                 current["unavailable_role_id"],
                 current["updated_at"],
@@ -1746,6 +1763,72 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def add_watchlist_entry(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        actor_id: int | None,
+        actor_tag: str | None,
+        reason: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO watchlist_entries (
+                guild_id,
+                user_id,
+                user_tag,
+                actor_id,
+                actor_tag,
+                reason,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                user_tag = excluded.user_tag,
+                actor_id = excluded.actor_id,
+                actor_tag = excluded.actor_tag,
+                reason = excluded.reason,
+                created_at = excluded.created_at
+            """,
+            (
+                guild_id,
+                user_id,
+                user_tag,
+                actor_id,
+                actor_tag,
+                reason,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+
+    def remove_watchlist_entry(self, guild_id: int, user_id: int) -> None:
+        self.connection.execute(
+            "DELETE FROM watchlist_entries WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        self.connection.commit()
+
+    def get_watchlist_entry(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM watchlist_entries WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_watchlist(self, guild_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM watchlist_entries
+            WHERE guild_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def set_presence(
         self,
         *,
@@ -1866,6 +1949,18 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_member_deleted_messages(self, guild_id: int, user_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM messages
+            WHERE guild_id = ? AND author_id = ? AND deleted_at IS NOT NULL
+            ORDER BY deleted_at DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_recent_reports(self, guild_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             """
@@ -1883,6 +1978,42 @@ class Database:
             """
             SELECT * FROM reports
             WHERE guild_id = ? AND (reporter_id = ? OR reported_id = ?)
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, user_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_member_event_history(self, guild_id: int, user_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM member_events
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY occurred_at DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_member_automod_history(self, guild_id: int, user_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM automod_events
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_member_ticket_history(self, guild_id: int, user_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM tickets
+            WHERE guild_id = ? AND (creator_id = ? OR target_user_id = ?)
             ORDER BY created_at DESC
             LIMIT ?
             """,

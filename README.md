@@ -89,7 +89,7 @@ Observacoes importantes para Railway:
 
 Depois que o bot entrar no servidor:
 
-1. Use `/configurar_canais` para definir os canais de logs, reports, ajuda e avaliacoes.
+1. Use `/configurar_canais` para definir os canais de logs, reports, ajuda, avaliacoes e vigia.
 2. Use `/painel_ajuda` para criar o painel de status de ajuda.
 3. Use `/painel_tickets` para criar o painel de atendimento e denuncias.
 4. Use `/painel_grades` para criar o painel competitivo de grades.
@@ -129,6 +129,10 @@ No `/painel_grades`, os botoes atuais incluem:
 - `/blacklist_add`
 - `/blacklist_remove`
 - `/blacklist_lista`
+- `/vigia_add`
+- `/vigia_remove`
+- `/vigia_lista`
+- `/vigia_historico`
 - `/presenca`
 - `/presencas`
 - `/saldo`
@@ -299,3 +303,4 @@ Tabelas principais:
 - Para automod com timeout automatico, o bot precisa de `Moderate Members`.
 - Se voce expor o dashboard web publicamente, use `DASHBOARD_TOKEN`.
 - Se um token do bot for exposto em arquivo, log ou commit, gere um novo token no Discord Developer Portal imediatamente.
+- O canal `vigia` deve ser privado da staff, porque ele recebe alertas da watchlist.

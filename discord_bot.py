@@ -375,6 +375,13 @@ class ClanCog(commands.Cog):
         embed.add_field(name="Conteudo", value=trim_text(message.content), inline=False)
         embed.add_field(name="Arquivos", value=format_attachment_field(record["attachments_json"] if record else None), inline=False)
         await self.emit_log(message.guild, embed)
+        if self.bot.get_watchlist_entry(message.guild.id, message.author.id):
+            watch_embed = self.build_embed("Vigia | Nova mensagem", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{message.author.mention} (`{message.author.id}`)", inline=False)
+            watch_embed.add_field(name="Canal", value=message.channel.mention, inline=True)
+            watch_embed.add_field(name="Link", value=f"[Abrir mensagem]({message.jump_url})", inline=True)
+            watch_embed.add_field(name="Conteudo", value=trim_text(message.content), inline=False)
+            await self.bot.emit_watch_alert(message.guild, message.author.id, watch_embed)
 
     @commands.Cog.listener()
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
@@ -398,6 +405,14 @@ class ClanCog(commands.Cog):
         embed.add_field(name="Antes", value=trim_text(before.content), inline=False)
         embed.add_field(name="Depois", value=trim_text(after.content), inline=False)
         await self.emit_log(after.guild, embed)
+        if self.bot.get_watchlist_entry(after.guild.id, after.author.id):
+            watch_embed = self.build_embed("Vigia | Mensagem editada", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{after.author.mention} (`{after.author.id}`)", inline=False)
+            watch_embed.add_field(name="Canal", value=after.channel.mention, inline=True)
+            watch_embed.add_field(name="Link", value=f"[Abrir mensagem]({after.jump_url})", inline=True)
+            watch_embed.add_field(name="Antes", value=trim_text(before.content), inline=False)
+            watch_embed.add_field(name="Depois", value=trim_text(after.content), inline=False)
+            await self.bot.emit_watch_alert(after.guild, after.author.id, watch_embed)
 
     @commands.Cog.listener()
     async def on_message_delete(self, message: discord.Message) -> None:
@@ -439,6 +454,17 @@ class ClanCog(commands.Cog):
         embed.add_field(name="Conteudo salvo", value=trim_text(record["content"] if record else message.content), inline=False)
         embed.add_field(name="Arquivos", value=format_attachment_field(record["attachments_json"] if record else None), inline=False)
         await self.emit_log(message.guild, embed)
+        if self.bot.get_watchlist_entry(message.guild.id, message.author.id):
+            watch_embed = self.build_embed("Vigia | Mensagem apagada", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{message.author.mention} (`{message.author.id}`)", inline=False)
+            watch_embed.add_field(name="Canal", value=message.channel.mention, inline=True)
+            watch_embed.add_field(name="Apagada por", value=deleted_by_tag or "autor ou desconhecido", inline=True)
+            watch_embed.add_field(
+                name="Conteudo salvo",
+                value=trim_text(record["content"] if record else message.content),
+                inline=False,
+            )
+            await self.bot.emit_watch_alert(message.guild, message.author.id, watch_embed)
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
@@ -517,6 +543,15 @@ class ClanCog(commands.Cog):
             inline=True,
         )
         await self.emit_log(member.guild, embed)
+        if self.bot.get_watchlist_entry(member.guild.id, member.id):
+            watch_embed = self.build_embed("Vigia | Membro entrou", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{member.mention} (`{member.id}`)", inline=False)
+            watch_embed.add_field(
+                name="Convite usado",
+                value=used_invite.code if used_invite else "Nao foi possivel identificar",
+                inline=True,
+            )
+            await self.bot.emit_watch_alert(member.guild, member.id, watch_embed)
         await self.bot.handle_anti_raid(member.guild, member)
 
         blacklist = self.bot.database.get_blacklist_entry(member.guild.id, member.id)
@@ -553,6 +588,13 @@ class ClanCog(commands.Cog):
                 active=False,
             )
         await self.emit_log(member.guild, embed)
+        if self.bot.get_watchlist_entry(member.guild.id, member.id):
+            watch_embed = self.build_embed("Vigia | Membro saiu", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{member} (`{member.id}`)", inline=False)
+            if actor_tag:
+                watch_embed.add_field(name="Tipo", value="Kick detectado", inline=True)
+                watch_embed.add_field(name="Por", value=actor_tag, inline=True)
+            await self.bot.emit_watch_alert(member.guild, member.id, watch_embed)
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
@@ -562,6 +604,12 @@ class ClanCog(commands.Cog):
             embed.add_field(name="Antes", value=before.nick or before.name, inline=True)
             embed.add_field(name="Depois", value=after.nick or after.name, inline=True)
             await self.emit_log(after.guild, embed)
+            if self.bot.get_watchlist_entry(after.guild.id, after.id):
+                watch_embed = self.build_embed("Vigia | Nickname alterado", color=discord.Color.dark_red())
+                watch_embed.add_field(name="Membro", value=f"{after.mention} (`{after.id}`)", inline=False)
+                watch_embed.add_field(name="Antes", value=before.nick or before.name, inline=True)
+                watch_embed.add_field(name="Depois", value=after.nick or after.name, inline=True)
+                await self.bot.emit_watch_alert(after.guild, after.id, watch_embed)
 
         before_roles = {role.id for role in before.roles}
         after_roles = {role.id for role in after.roles}
@@ -575,6 +623,14 @@ class ClanCog(commands.Cog):
             if removed:
                 embed.add_field(name="Removidos", value="\n".join(removed[:10]), inline=False)
             await self.emit_log(after.guild, embed)
+            if self.bot.get_watchlist_entry(after.guild.id, after.id):
+                watch_embed = self.build_embed("Vigia | Cargos alterados", color=discord.Color.dark_red())
+                watch_embed.add_field(name="Membro", value=f"{after.mention} (`{after.id}`)", inline=False)
+                if added:
+                    watch_embed.add_field(name="Adicionados", value="\n".join(added[:10]), inline=False)
+                if removed:
+                    watch_embed.add_field(name="Removidos", value="\n".join(removed[:10]), inline=False)
+                await self.bot.emit_watch_alert(after.guild, after.id, watch_embed)
 
         if before.timed_out_until != after.timed_out_until:
             embed = self.build_embed("Timeout alterado", color=discord.Color.dark_orange())
@@ -585,12 +641,25 @@ class ClanCog(commands.Cog):
                 inline=False,
             )
             await self.emit_log(after.guild, embed)
+            if self.bot.get_watchlist_entry(after.guild.id, after.id):
+                watch_embed = self.build_embed("Vigia | Timeout alterado", color=discord.Color.dark_red())
+                watch_embed.add_field(name="Membro", value=f"{after.mention} (`{after.id}`)", inline=False)
+                watch_embed.add_field(
+                    name="Novo prazo",
+                    value=after.timed_out_until.isoformat(timespec="seconds") if after.timed_out_until else "Removido",
+                    inline=False,
+                )
+                await self.bot.emit_watch_alert(after.guild, after.id, watch_embed)
 
     @commands.Cog.listener()
     async def on_member_ban(self, guild: discord.Guild, user: discord.User) -> None:
         embed = self.build_embed("Membro banido", color=discord.Color.red())
         embed.add_field(name="Membro", value=f"{user} (`{user.id}`)", inline=False)
         await self.emit_log(guild, embed)
+        if self.bot.get_watchlist_entry(guild.id, user.id):
+            watch_embed = self.build_embed("Vigia | Ban detectado", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{user} (`{user.id}`)", inline=False)
+            await self.bot.emit_watch_alert(guild, user.id, watch_embed)
         self.bot.database.log_moderation_action(
             guild_id=guild.id,
             target_user_id=user.id,
@@ -704,6 +773,7 @@ class ClanCog(commands.Cog):
         reports="Canal que vai receber os reports.",
         ajuda="Canal que vai receber os pedidos de ajuda.",
         avaliacoes="Canal que vai guardar o historico das avaliacoes de grade.",
+        vigia="Canal privado para alertas da watchlist.",
     )
     async def configurar_canais(
         self,
@@ -712,12 +782,13 @@ class ClanCog(commands.Cog):
         reports: discord.TextChannel | None = None,
         ajuda: discord.TextChannel | None = None,
         avaliacoes: discord.TextChannel | None = None,
+        vigia: discord.TextChannel | None = None,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
             return
 
-        if logs is None and reports is None and ajuda is None and avaliacoes is None:
+        if logs is None and reports is None and ajuda is None and avaliacoes is None and vigia is None:
             await interaction.response.send_message("Informe pelo menos um canal para atualizar.", ephemeral=True)
             return
 
@@ -730,6 +801,8 @@ class ClanCog(commands.Cog):
             payload["help_channel_id"] = ajuda.id
         if avaliacoes is not None:
             payload["evaluation_channel_id"] = avaliacoes.id
+        if vigia is not None:
+            payload["watch_channel_id"] = vigia.id
 
         self.bot.database.upsert_guild_settings(interaction.guild.id, **payload)
 
@@ -742,6 +815,8 @@ class ClanCog(commands.Cog):
             lines.append(f"Ajuda: {ajuda.mention}")
         if avaliacoes is not None:
             lines.append(f"Avaliacoes: {avaliacoes.mention}")
+        if vigia is not None:
+            lines.append(f"Vigia: {vigia.mention}")
 
         await interaction.response.send_message("Configuracao salva.\n" + "\n".join(lines), ephemeral=True)
 
@@ -1181,6 +1256,14 @@ class ClanCog(commands.Cog):
         log_embed.add_field(name="Reportado", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
         log_embed.add_field(name="Ticket", value=ticket_channel.mention, inline=True)
         await self.emit_log(interaction.guild, log_embed)
+        if self.bot.get_watchlist_entry(interaction.guild.id, reporter.id) or self.bot.get_watchlist_entry(interaction.guild.id, usuario.id):
+            watch_embed = self.build_embed("Vigia | Report relacionado", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Reporter", value=f"{reporter.mention} (`{reporter.id}`)", inline=False)
+            watch_embed.add_field(name="Reportado", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
+            watch_embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
+            watch_embed.add_field(name="Ticket", value=ticket_channel.mention, inline=True)
+            target_watch_id = usuario.id if self.bot.get_watchlist_entry(interaction.guild.id, usuario.id) else reporter.id
+            await self.bot.emit_watch_alert(interaction.guild, target_watch_id, watch_embed)
 
         await interaction.followup.send(
             f"Seu report foi enviado em {ticket_channel.mention}. So voce e a staff conseguem ver esse canal.",
@@ -1210,6 +1293,12 @@ class ClanCog(commands.Cog):
         embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
         embed.add_field(name="Aplicado por", value=interaction.user.mention, inline=False)
         await self.emit_log(interaction.guild, embed)
+        if self.bot.get_watchlist_entry(interaction.guild.id, usuario.id):
+            watch_embed = self.build_embed("Vigia | Warn aplicado", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
+            watch_embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
+            watch_embed.add_field(name="Aplicado por", value=interaction.user.mention, inline=False)
+            await self.bot.emit_watch_alert(interaction.guild, usuario.id, watch_embed)
         await interaction.response.send_message("Warn registrado com sucesso.", ephemeral=True)
 
     @app_commands.command(name="timeout", description="Aplica um timeout em um membro.")
@@ -1243,6 +1332,12 @@ class ClanCog(commands.Cog):
             duration_seconds=minutos * 60,
             expires_at=until.isoformat(timespec="seconds"),
         )
+        if self.bot.get_watchlist_entry(interaction.guild.id, usuario.id):
+            watch_embed = self.build_embed("Vigia | Timeout aplicado", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
+            watch_embed.add_field(name="Duracao", value=f"{minutos} minuto(s)", inline=True)
+            watch_embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
+            await self.bot.emit_watch_alert(interaction.guild, usuario.id, watch_embed)
         await interaction.response.send_message(
             f"Timeout aplicado em {usuario.mention} por {minutos} minuto(s).",
             ephemeral=True,
@@ -1270,6 +1365,12 @@ class ClanCog(commands.Cog):
             action_type="kick",
             reason=motivo,
         )
+        if self.bot.get_watchlist_entry(interaction.guild.id, usuario.id):
+            watch_embed = self.build_embed("Vigia | Kick aplicado", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
+            watch_embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
+            watch_embed.add_field(name="Aplicado por", value=interaction.user.mention, inline=False)
+            await self.bot.emit_watch_alert(interaction.guild, usuario.id, watch_embed)
         await interaction.response.send_message("Membro expulso com sucesso.", ephemeral=True)
 
     @app_commands.command(name="banir", description="Bane um membro do servidor.")
@@ -1294,6 +1395,12 @@ class ClanCog(commands.Cog):
             action_type="ban",
             reason=motivo,
         )
+        if self.bot.get_watchlist_entry(interaction.guild.id, usuario.id):
+            watch_embed = self.build_embed("Vigia | Ban aplicado", color=discord.Color.dark_red())
+            watch_embed.add_field(name="Membro", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
+            watch_embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
+            watch_embed.add_field(name="Aplicado por", value=interaction.user.mention, inline=False)
+            await self.bot.emit_watch_alert(interaction.guild, usuario.id, watch_embed)
         await interaction.response.send_message("Membro banido com sucesso.", ephemeral=True)
 
     @app_commands.command(name="blacklist_add", description="Adiciona um membro a blacklist do cla.")
@@ -1342,6 +1449,156 @@ class ClanCog(commands.Cog):
                 value=f"Motivo: {trim_text(entry['reason'], 200)}",
                 inline=False,
             )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="vigia_add", description="Coloca um membro na watchlist privada da staff.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def vigia_add(self, interaction: discord.Interaction, usuario: discord.Member, motivo: str) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        self.bot.database.add_watchlist_entry(
+            guild_id=interaction.guild.id,
+            user_id=usuario.id,
+            user_tag=str(usuario),
+            actor_id=interaction.user.id,
+            actor_tag=str(interaction.user),
+            reason=motivo,
+        )
+
+        embed = self.build_embed("Vigia ativado", color=discord.Color.dark_red())
+        embed.add_field(name="Membro", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
+        embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
+        embed.add_field(name="Adicionado por", value=interaction.user.mention, inline=False)
+        await self.bot.emit_watch_alert(interaction.guild, usuario.id, embed)
+        await interaction.response.send_message(f"{usuario.mention} entrou na watchlist da staff.", ephemeral=True)
+
+    @app_commands.command(name="vigia_remove", description="Remove um membro da watchlist privada da staff.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def vigia_remove(self, interaction: discord.Interaction, usuario: discord.Member) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        self.bot.database.remove_watchlist_entry(interaction.guild.id, usuario.id)
+        await interaction.response.send_message(f"{usuario.mention} saiu da watchlist da staff.", ephemeral=True)
+
+    @app_commands.command(name="vigia_lista", description="Lista os membros atualmente em observacao.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def vigia_lista(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        entries = self.bot.database.list_watchlist(interaction.guild.id, limit=30)
+        if not entries:
+            await interaction.response.send_message("A watchlist da staff esta vazia.", ephemeral=True)
+            return
+
+        embed = self.build_embed("Watchlist da staff", color=discord.Color.dark_red())
+        embed.description = "Membros com acompanhamento especial do vigia."
+        for entry in entries[:15]:
+            member = interaction.guild.get_member(entry["user_id"])
+            member_text = member.mention if member else f"`{entry['user_id']}`"
+            embed.add_field(
+                name=entry["user_tag"],
+                value=(
+                    f"Membro: {member_text}\n"
+                    f"Motivo: {trim_text(entry['reason'], 140)}\n"
+                    f"Desde: {format_discord_timestamp(entry['created_at'], 'R')}"
+                ),
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="vigia_historico", description="Resume a atividade recente de um membro observado.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def vigia_historico(self, interaction: discord.Interaction, usuario: discord.Member) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        watch_entry = self.bot.database.get_watchlist_entry(interaction.guild.id, usuario.id)
+        moderation = self.bot.database.get_member_moderation_history(interaction.guild.id, usuario.id, limit=5)
+        reports = self.bot.database.get_member_reports(interaction.guild.id, usuario.id, limit=5)
+        member_events = self.bot.database.get_member_event_history(interaction.guild.id, usuario.id, limit=5)
+        deleted_messages = self.bot.database.get_member_deleted_messages(interaction.guild.id, usuario.id, limit=5)
+        automod_events = self.bot.database.get_member_automod_history(interaction.guild.id, usuario.id, limit=5)
+        tickets = self.bot.database.get_member_ticket_history(interaction.guild.id, usuario.id, limit=5)
+
+        embed = self.build_embed("Historico do vigia", color=discord.Color.dark_red())
+        embed.description = "Resumo rapido para investigacao interna da staff."
+        embed.add_field(name="Membro", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
+        embed.add_field(name="Na watchlist", value="Sim" if watch_entry else "Nao", inline=True)
+        embed.add_field(name="Reports", value=str(len(reports)), inline=True)
+        embed.add_field(name="Punicoes", value=str(len(moderation)), inline=True)
+        embed.add_field(name="Mensagens apagadas", value=str(len(deleted_messages)), inline=True)
+        embed.add_field(name="Tickets recentes", value=str(len(tickets)), inline=True)
+
+        if watch_entry:
+            embed.add_field(name="Motivo da observacao", value=trim_text(watch_entry["reason"], 1024), inline=False)
+
+        if member_events:
+            embed.add_field(
+                name="Eventos do servidor",
+                value="\n".join(
+                    f"- {row['event_type']} ({format_discord_timestamp(row['occurred_at'], 'R')})"
+                    for row in member_events
+                ),
+                inline=False,
+            )
+
+        if moderation:
+            embed.add_field(
+                name="Acoes da staff",
+                value="\n".join(
+                    f"- {row['action_type']}: {trim_text(row.get('reason'), 90)}"
+                    for row in moderation
+                ),
+                inline=False,
+            )
+
+        if reports:
+            embed.add_field(
+                name="Reports relacionados",
+                value="\n".join(
+                    f"- {row['reporter_tag']} -> {row['reported_tag']}: {trim_text(row['reason'], 80)}"
+                    for row in reports
+                ),
+                inline=False,
+            )
+
+        if deleted_messages:
+            embed.add_field(
+                name="Ultimas mensagens apagadas",
+                value="\n".join(
+                    f"- {trim_text(row.get('content') or '(sem conteudo salvo)', 90)}"
+                    for row in deleted_messages
+                ),
+                inline=False,
+            )
+
+        if automod_events:
+            embed.add_field(
+                name="Eventos de automod",
+                value="\n".join(
+                    f"- {row['event_type']} ({row.get('action_taken') or 'sem acao'})"
+                    for row in automod_events
+                ),
+                inline=False,
+            )
+
+        if tickets:
+            embed.add_field(
+                name="Tickets recentes",
+                value="\n".join(
+                    f"- {ticket_type_label(row['ticket_type'])} | {ticket_status_label(row['status'])} | {format_discord_timestamp(row['created_at'], 'R')}"
+                    for row in tickets
+                ),
+                inline=False,
+            )
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="presenca", description="Atualiza sua presenca do cla.")
@@ -2452,6 +2709,7 @@ class ClanBot(commands.Bot):
             "report_channel_id": stored.get("report_channel_id") or self.settings.default_report_channel_id,
             "help_channel_id": stored.get("help_channel_id") or self.settings.default_help_channel_id,
             "evaluation_channel_id": stored.get("evaluation_channel_id"),
+            "watch_channel_id": stored.get("watch_channel_id"),
             "available_role_id": stored.get("available_role_id"),
             "unavailable_role_id": stored.get("unavailable_role_id"),
         }
@@ -2475,6 +2733,31 @@ class ClanBot(commands.Bot):
         channel_id = self.get_guild_settings(guild.id)["evaluation_channel_id"]
         channel = guild.get_channel(channel_id) if channel_id else self.get_log_channel(guild)
         return channel if isinstance(channel, discord.TextChannel) else None
+
+    def get_watch_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
+        channel_id = self.get_guild_settings(guild.id)["watch_channel_id"]
+        channel = guild.get_channel(channel_id) if channel_id else self.get_log_channel(guild)
+        return channel if isinstance(channel, discord.TextChannel) else None
+
+    def get_watchlist_entry(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        return self.database.get_watchlist_entry(guild_id, user_id)
+
+    async def emit_watch_alert(self, guild: discord.Guild, user_id: int, embed: discord.Embed) -> None:
+        watch_entry = self.get_watchlist_entry(guild.id, user_id)
+        if watch_entry is None:
+            return
+
+        channel = self.get_watch_channel(guild)
+        if channel is None:
+            return
+
+        embed.set_footer(text="Apostle Bot | Vigia da staff")
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning("Sem permissao para enviar alertas de vigia em %s", guild.name)
+        except discord.HTTPException:
+            logger.exception("Falha ao enviar alerta de vigia em %s", guild.name)
 
     def get_apostle_balance(self, guild_id: int, user_id: int) -> int:
         row = self.database.get_apostle_balance(guild_id, user_id)
