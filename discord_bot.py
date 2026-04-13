@@ -72,6 +72,14 @@ class ApostleShopItem:
     grant_badge: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class ApostleProgressionTitle:
+    key: str
+    name: str
+    required_points: int
+    description: str
+
+
 def trim_text(value: str | None, limit: int = 1000) -> str:
     if not value:
         return "(sem texto)"
@@ -183,6 +191,50 @@ APOSTLE_PAY_MINIMUM = 25
 APOSTLE_WORK_COOLDOWN = timedelta(hours=2)
 APOSTLE_HUNT_COOLDOWN = timedelta(hours=1)
 APOSTLE_DAILY_COOLDOWN = timedelta(days=1)
+
+APOSTLE_PROGRESSION_TITLES: tuple[ApostleProgressionTitle, ...] = (
+    ApostleProgressionTitle(
+        key="apostolo_nivel_1",
+        name="Apostolo Nivel 1",
+        required_points=1000,
+        description="Primeiro marco da trilha de Pontos de Apostolo.",
+    ),
+    ApostleProgressionTitle(
+        key="apostolo_nivel_2",
+        name="Apostolo Nivel 2",
+        required_points=2500,
+        description="Prova que o membro ja nao esta so comecando.",
+    ),
+    ApostleProgressionTitle(
+        key="apostolo_nivel_3",
+        name="Apostolo Nivel 3",
+        required_points=5000,
+        description="Marco intermediario para quem mantem ritmo de atividade.",
+    ),
+    ApostleProgressionTitle(
+        key="apostolo_nivel_4",
+        name="Apostolo Nivel 4",
+        required_points=10000,
+        description="Titulo para quem ja construiu uma boa historia na economia.",
+    ),
+    ApostleProgressionTitle(
+        key="apostolo_nivel_5",
+        name="Apostolo Nivel 5",
+        required_points=20000,
+        description="Patamar alto para membros realmente consistentes.",
+    ),
+    ApostleProgressionTitle(
+        key="apostolo_nivel_6",
+        name="Apostolo Nivel 6",
+        required_points=40000,
+        description="Topo da trilha base de Pontos de Apostolo.",
+    ),
+)
+
+APOSTLE_PROGRESSION_TITLE_CHOICES = [
+    app_commands.Choice(name=f"{title.name} ({format_points(title.required_points)} pontos)", value=title.key)
+    for title in APOSTLE_PROGRESSION_TITLES
+]
 
 APOSTLE_SHOP_ITEMS: tuple[ApostleShopItem, ...] = (
     ApostleShopItem(
@@ -692,6 +744,81 @@ class ClanCog(commands.Cog):
             lines.append(f"Avaliacoes: {avaliacoes.mention}")
 
         await interaction.response.send_message("Configuracao salva.\n" + "\n".join(lines), ephemeral=True)
+
+    @app_commands.command(
+        name="configurar_titulos_apostolo",
+        description="Vincula cargos aos titulos progressivos de Pontos de Apostolo.",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(
+        titulo="Marco progressivo que vai receber um cargo automatico.",
+        cargo="Cargo aplicado ao titulo. Deixe vazio para remover o mapeamento.",
+    )
+    @app_commands.choices(titulo=APOSTLE_PROGRESSION_TITLE_CHOICES)
+    async def configurar_titulos_apostolo(
+        self,
+        interaction: discord.Interaction,
+        titulo: str | None = None,
+        cargo: discord.Role | None = None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        if titulo is None and cargo is None:
+            configured = {
+                row["title_key"]: guild.get_role(int(row["role_id"]))
+                for row in self.bot.database.list_apostle_title_roles(guild.id)
+            }
+            embed = self.build_embed("Titulos progressivos de Apostolo", color=discord.Color.dark_gold())
+            embed.description = (
+                "Configure aqui quais cargos automaticos vao acompanhar cada marco de Pontos de Apostolo.\n"
+                "Use o mesmo comando com `titulo` e `cargo` para salvar, ou deixe `cargo` vazio para remover."
+            )
+            for title_info in APOSTLE_PROGRESSION_TITLES:
+                mapped_role = configured.get(title_info.key)
+                embed.add_field(
+                    name=f"{title_info.name} | {format_points(title_info.required_points)}",
+                    value=mapped_role.mention if mapped_role is not None else "Nenhum cargo configurado.",
+                    inline=False,
+                )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        if titulo is None:
+            await interaction.response.send_message("Escolha qual titulo progressivo voce quer configurar.", ephemeral=True)
+            return
+
+        title_info = self.bot.get_apostle_progression_title(titulo)
+        if title_info is None:
+            await interaction.response.send_message("Nao encontrei esse titulo progressivo.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        if cargo is None:
+            self.bot.database.delete_apostle_title_role(guild.id, title_info.key)
+            action_text = f"O cargo automatico de **{title_info.name}** foi removido."
+        else:
+            self.bot.database.upsert_apostle_title_role(guild.id, title_info.key, cargo.id)
+            action_text = (
+                f"O titulo **{title_info.name}** agora aplica o cargo {cargo.mention} quando o membro alcanca "
+                f"`{format_points(title_info.required_points)}` pontos acumulados."
+            )
+
+        synced_members = 0
+        for user_id in self.bot.database.list_apostle_user_ids(guild.id):
+            member = guild.get_member(user_id)
+            if member is None or member.bot:
+                continue
+            await self.bot.sync_apostle_progression_role(member)
+            synced_members += 1
+
+        await interaction.followup.send(
+            f"{action_text}\nSincronizacao concluida em `{synced_members}` perfil(is) da economia.",
+            ephemeral=True,
+        )
 
     @app_commands.command(name="configurar_cargos_ajuda", description="Define os cargos usados no sistema de ajuda.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -1555,6 +1682,7 @@ class ClanCog(commands.Cog):
 
         bonus = min(APOSTLE_DAILY_STREAK_MAX_BONUS, max(0, streak - 1) * APOSTLE_DAILY_STREAK_STEP)
         reward = APOSTLE_DAILY_BASE + bonus
+        earned_before = self.bot.get_apostle_progress_total(guild.id, member.id)
         new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), reward)
         self.bot.database.upsert_apostle_profile(
             guild_id=guild.id,
@@ -1572,6 +1700,7 @@ class ClanCog(commands.Cog):
             details=f"Streak {streak}",
             balance_after=new_balance,
         )
+        await self.bot.refresh_apostle_progression(member, previous_total_earned=earned_before)
 
         embed = self.build_embed("Diario resgatado", color=discord.Color.green())
         embed.description = "A God Hand observou sua presenca e deixou uma oferenda."
@@ -1608,6 +1737,7 @@ class ClanCog(commands.Cog):
             await interaction.response.send_message("Voce nao tem saldo suficiente para essa transferencia.", ephemeral=True)
             return
 
+        receiver_earned_before = self.bot.get_apostle_progress_total(guild.id, usuario.id)
         receiver_balance = self.bot.database.adjust_apostle_balance(guild.id, usuario.id, str(usuario), quantia)
         self.bot.database.log_apostle_transaction(
             guild_id=guild.id,
@@ -1631,6 +1761,7 @@ class ClanCog(commands.Cog):
             counterparty_tag=str(member),
             balance_after=receiver_balance,
         )
+        await self.bot.refresh_apostle_progression(usuario, previous_total_earned=receiver_earned_before)
 
         embed = self.build_embed("Transferencia concluida", color=discord.Color.blurple())
         embed.add_field(name="De", value=member.mention, inline=True)
@@ -1664,6 +1795,7 @@ class ClanCog(commands.Cog):
                 "Voce escoltou um carregamento amaldiçoado sem fazer perguntas.",
             ]
         )
+        earned_before = self.bot.get_apostle_progress_total(guild.id, member.id)
         new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), reward)
         self.bot.database.log_apostle_transaction(
             guild_id=guild.id,
@@ -1680,6 +1812,7 @@ class ClanCog(commands.Cog):
             "work",
             (discord.utils.utcnow() + APOSTLE_WORK_COOLDOWN).isoformat(timespec="seconds"),
         )
+        await self.bot.refresh_apostle_progression(member, previous_total_earned=earned_before)
         await interaction.response.send_message(
             f"{flavor}\nVoce ganhou `{format_points(reward)}` Pontos de Apostolo.",
         )
@@ -1730,6 +1863,7 @@ class ClanCog(commands.Cog):
                 ]
             )
 
+        earned_before = self.bot.get_apostle_progress_total(guild.id, member.id)
         new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), reward)
         if new_balance is None:
             reward = 0
@@ -1751,6 +1885,8 @@ class ClanCog(commands.Cog):
             "hunt",
             (discord.utils.utcnow() + APOSTLE_HUNT_COOLDOWN).isoformat(timespec="seconds"),
         )
+        if reward > 0:
+            await self.bot.refresh_apostle_progression(member, previous_total_earned=earned_before)
         verb = "ganhou" if reward >= 0 else "perdeu"
         await interaction.response.send_message(
             f"{text}\nVoce {verb} `{format_points(abs(reward))}` Pontos de Apostolo.",
@@ -1784,6 +1920,7 @@ class ClanCog(commands.Cog):
             delta = int(quantia * 3)
             text = "O Behelit sorriu para voce. O ritual explodiu em lucro profano."
 
+        earned_before = self.bot.get_apostle_progress_total(guild.id, member.id)
         new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), delta)
         self.bot.database.log_apostle_transaction(
             guild_id=guild.id,
@@ -1794,6 +1931,8 @@ class ClanCog(commands.Cog):
             details=f"Ritual com aposta base de {quantia}",
             balance_after=new_balance,
         )
+        if delta > 0:
+            await self.bot.refresh_apostle_progression(member, previous_total_earned=earned_before)
         verb = "ganhou" if delta >= 0 else "perdeu"
         await interaction.response.send_message(
             f"{text}\nVoce {verb} `{format_points(abs(delta))}` Pontos de Apostolo.",
@@ -1823,6 +1962,7 @@ class ClanCog(commands.Cog):
             return
 
         delta = aposta if normalized_choice == result else -aposta
+        earned_before = self.bot.get_apostle_progress_total(guild.id, member.id)
         new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), delta)
         self.bot.database.log_apostle_transaction(
             guild_id=guild.id,
@@ -1833,6 +1973,8 @@ class ClanCog(commands.Cog):
             details=f"Escolheu {normalized_choice}, caiu {result}",
             balance_after=new_balance,
         )
+        if delta > 0:
+            await self.bot.refresh_apostle_progression(member, previous_total_earned=earned_before)
         verb = "ganhou" if delta > 0 else "perdeu"
         await interaction.response.send_message(
             f"A moeda caiu em **{result}**. Voce {verb} `{format_points(abs(delta))}` Pontos de Apostolo.",
@@ -1861,6 +2003,7 @@ class ClanCog(commands.Cog):
             return
 
         delta = aposta * 5 if result == numero else -aposta
+        earned_before = self.bot.get_apostle_progress_total(guild.id, member.id)
         new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), delta)
         self.bot.database.log_apostle_transaction(
             guild_id=guild.id,
@@ -1871,6 +2014,8 @@ class ClanCog(commands.Cog):
             details=f"Escolheu {numero}, caiu {result}",
             balance_after=new_balance,
         )
+        if delta > 0:
+            await self.bot.refresh_apostle_progression(member, previous_total_earned=earned_before)
         verb = "ganhou" if delta > 0 else "perdeu"
         await interaction.response.send_message(
             f"O dado caiu em **{result}**. Voce {verb} `{format_points(abs(delta))}` Pontos de Apostolo.",
@@ -1935,16 +2080,47 @@ class ClanCog(commands.Cog):
             return
 
         inventory = self.bot.database.list_apostle_inventory(guild.id, target.id)
-        if not inventory:
+        unlocked_titles = self.bot.get_unlocked_apostle_progression_titles(guild.id, target.id)
+        next_titles = [
+            title_info
+            for title_info in APOSTLE_PROGRESSION_TITLES
+            if title_info.key not in {item.key for item in unlocked_titles}
+        ][:3]
+
+        if not inventory and not unlocked_titles:
             await interaction.response.send_message("O inventario ainda esta vazio.", ephemeral=True)
             return
 
         embed = self.build_embed("Inventario de Apostolo", color=discord.Color.dark_orange())
-        embed.description = f"Itens de {target.mention}."
-        for item in inventory[:15]:
+        embed.description = f"Itens e titulos desbloqueados de {target.mention}."
+
+        if inventory:
+            item_lines = [
+                f"- **{item['item_name']}** (`{item['item_key']}`) x{item['quantity']}"
+                for item in inventory[:15]
+            ]
+            embed.add_field(name="Itens comprados", value="\n".join(item_lines), inline=False)
+
+        if unlocked_titles:
+            role_map = self.bot.get_apostle_title_role_map(guild)
+            title_lines = []
+            for title_info in unlocked_titles:
+                mapped_role = role_map.get(title_info.key)
+                suffix = f" | cargo: {mapped_role.mention}" if mapped_role is not None else ""
+                title_lines.append(
+                    f"- **{title_info.name}** (`{format_points(title_info.required_points)}` pontos){suffix}"
+                )
+            embed.add_field(name="Titulos progressivos desbloqueados", value="\n".join(title_lines[-10:]), inline=False)
+
+        if next_titles:
+            total_earned = self.bot.get_apostle_progress_total(guild.id, target.id)
             embed.add_field(
-                name=item["item_name"],
-                value=f"Chave: `{item['item_key']}`\nQuantidade: `{item['quantity']}`",
+                name="Proximos desbloqueios",
+                value="\n".join(
+                    f"- **{title_info.name}** em `{format_points(title_info.required_points)}`"
+                    f" (faltam `{format_points(max(0, title_info.required_points - total_earned))}`)"
+                    for title_info in next_titles
+                ),
                 inline=False,
             )
         await interaction.response.send_message(embed=embed, ephemeral=usuario is None)
@@ -1957,9 +2133,34 @@ class ClanCog(commands.Cog):
             return
 
         member = interaction.user
+        progression_title = self.bot.get_apostle_progression_title(item)
+        if progression_title is not None:
+            if not self.bot.has_unlocked_apostle_progression_title(guild.id, member.id, progression_title.key):
+                await interaction.response.send_message(
+                    "Voce ainda nao desbloqueou esse titulo progressivo.",
+                    ephemeral=True,
+                )
+                return
+
+            self.bot.database.upsert_apostle_profile(
+                guild_id=guild.id,
+                user_id=member.id,
+                user_tag=str(member),
+                selected_title=progression_title.name,
+            )
+            await self.bot.sync_apostle_progression_role(member)
+            await interaction.response.send_message(
+                f"Voce equipou o titulo progressivo **{progression_title.name}**.",
+                ephemeral=True,
+            )
+            return
+
         shop_item = self.bot.get_apostle_shop_item(item)
         if shop_item is None:
-            await interaction.response.send_message("Nao encontrei esse item cadastrrado para equipar.", ephemeral=True)
+            await interaction.response.send_message(
+                "Nao encontrei esse item ou titulo cadastrado para equipar.",
+                ephemeral=True,
+            )
             return
 
         owned = self.bot.database.get_apostle_inventory_item(guild.id, member.id, shop_item.key)
@@ -2027,6 +2228,7 @@ class ClanCog(commands.Cog):
             await interaction.response.send_message("Informe uma quantia diferente de zero.", ephemeral=True)
             return
 
+        earned_before = self.bot.get_apostle_progress_total(interaction.guild.id, usuario.id)
         new_balance = self.bot.database.adjust_apostle_balance(interaction.guild.id, usuario.id, str(usuario), quantia)
         if new_balance is None:
             await interaction.response.send_message(
@@ -2046,6 +2248,8 @@ class ClanCog(commands.Cog):
             counterparty_tag=str(interaction.user),
             balance_after=new_balance,
         )
+        if quantia > 0:
+            await self.bot.refresh_apostle_progression(usuario, previous_total_earned=earned_before)
 
         action_word = "adicionados" if quantia > 0 else "removidos"
         await interaction.response.send_message(
@@ -2321,6 +2525,113 @@ class ClanBot(commands.Bot):
                 return item
         return None
 
+    def get_apostle_progression_title(self, query: str) -> ApostleProgressionTitle | None:
+        normalized = normalize_lookup_text(query)
+        for title_info in APOSTLE_PROGRESSION_TITLES:
+            if normalized in {
+                normalize_lookup_text(title_info.key),
+                normalize_lookup_text(title_info.name),
+            }:
+                return title_info
+        return None
+
+    def get_apostle_progress_total(self, guild_id: int, user_id: int) -> int:
+        return self.database.get_apostle_transaction_summary(guild_id, user_id)["earned"]
+
+    def get_unlocked_apostle_progression_titles(self, guild_id: int, user_id: int) -> list[ApostleProgressionTitle]:
+        total_earned = self.get_apostle_progress_total(guild_id, user_id)
+        return [title_info for title_info in APOSTLE_PROGRESSION_TITLES if total_earned >= title_info.required_points]
+
+    def get_highest_unlocked_apostle_progression_title(
+        self,
+        guild_id: int,
+        user_id: int,
+    ) -> ApostleProgressionTitle | None:
+        unlocked = self.get_unlocked_apostle_progression_titles(guild_id, user_id)
+        return unlocked[-1] if unlocked else None
+
+    def get_next_apostle_progression_title(self, guild_id: int, user_id: int) -> ApostleProgressionTitle | None:
+        total_earned = self.get_apostle_progress_total(guild_id, user_id)
+        for title_info in APOSTLE_PROGRESSION_TITLES:
+            if total_earned < title_info.required_points:
+                return title_info
+        return None
+
+    def has_unlocked_apostle_progression_title(self, guild_id: int, user_id: int, title_key: str) -> bool:
+        return any(title_info.key == title_key for title_info in self.get_unlocked_apostle_progression_titles(guild_id, user_id))
+
+    def get_apostle_title_role_map(self, guild: discord.Guild) -> dict[str, discord.Role]:
+        role_map: dict[str, discord.Role] = {}
+        for row in self.database.list_apostle_title_roles(guild.id):
+            role = guild.get_role(int(row["role_id"]))
+            if role is not None:
+                role_map[row["title_key"]] = role
+        return role_map
+
+    def get_highest_configured_apostle_title_role(
+        self,
+        member: discord.Member,
+    ) -> tuple[ApostleProgressionTitle | None, discord.Role | None]:
+        role_map = self.get_apostle_title_role_map(member.guild)
+        unlocked = self.get_unlocked_apostle_progression_titles(member.guild.id, member.id)
+        for title_info in reversed(unlocked):
+            mapped_role = role_map.get(title_info.key)
+            if mapped_role is not None:
+                return title_info, mapped_role
+        return None, None
+
+    async def sync_apostle_progression_role(self, member: discord.Member) -> tuple[ApostleProgressionTitle | None, discord.Role | None]:
+        role_map = self.get_apostle_title_role_map(member.guild)
+        configured_roles = list(role_map.values())
+        target_title, target_role = self.get_highest_configured_apostle_title_role(member)
+
+        roles_to_remove = [role for role in configured_roles if role != target_role and role in member.roles]
+        roles_to_add = [target_role] if target_role is not None and target_role not in member.roles else []
+        if not roles_to_remove and not roles_to_add:
+            return target_title, target_role
+
+        try:
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove, reason="Sincronizacao de titulo progressivo de Apostolo")
+            if roles_to_add:
+                await member.add_roles(*roles_to_add, reason="Sincronizacao de titulo progressivo de Apostolo")
+        except discord.Forbidden:
+            logger.warning(
+                "Nao foi possivel sincronizar cargos de titulo progressivo | guild=%s user=%s",
+                member.guild.id,
+                member.id,
+            )
+        except discord.HTTPException:
+            logger.exception(
+                "Falha HTTP ao sincronizar cargos de titulo progressivo | guild=%s user=%s",
+                member.guild.id,
+                member.id,
+            )
+        return target_title, target_role
+
+    async def refresh_apostle_progression(
+        self,
+        member: discord.Member,
+        *,
+        previous_total_earned: int | None = None,
+    ) -> dict[str, Any]:
+        current_total = self.get_apostle_progress_total(member.guild.id, member.id)
+        unlocked = self.get_unlocked_apostle_progression_titles(member.guild.id, member.id)
+        previous_total = previous_total_earned if previous_total_earned is not None else current_total
+        new_titles = [
+            title_info
+            for title_info in unlocked
+            if previous_total < title_info.required_points <= current_total
+        ]
+        synced_title, synced_role = await self.sync_apostle_progression_role(member)
+        return {
+            "total_earned": current_total,
+            "unlocked_titles": unlocked,
+            "new_titles": new_titles,
+            "synced_title": synced_title,
+            "synced_role": synced_role,
+        }
+
     def get_apostle_profile(self, guild_id: int, user_id: int, user_tag: str) -> dict[str, Any]:
         profile = self.database.get_apostle_profile(guild_id, user_id)
         if profile is None:
@@ -2336,6 +2647,10 @@ class ClanBot(commands.Bot):
         profile = self.get_apostle_profile(member.guild.id, member.id, str(member))
         totals = self.database.get_apostle_transaction_summary(member.guild.id, member.id)
         inventory = self.database.list_apostle_inventory(member.guild.id, member.id)
+        unlocked_titles = self.get_unlocked_apostle_progression_titles(member.guild.id, member.id)
+        highest_title = unlocked_titles[-1] if unlocked_titles else None
+        next_title = self.get_next_apostle_progression_title(member.guild.id, member.id)
+        synced_title, synced_role = self.get_highest_configured_apostle_title_role(member)
         recent_transactions = self.database.list_recent_apostle_transactions(member.guild.id, member.id, limit=5)
 
         embed = discord.Embed(
@@ -2345,18 +2660,46 @@ class ClanBot(commands.Bot):
         )
         title_text = profile.get("selected_title") or "Sem titulo equipado"
         badge_text = profile.get("selected_badge") or "Sem insignia equipada"
-        embed.description = f"**Titulo:** {title_text}\n**Insignia:** {badge_text}"
+        progress_lines = [
+            f"**Titulo equipado:** {title_text}",
+            f"**Insignia equipada:** {badge_text}",
+            f"**Patamar atual:** {highest_title.name if highest_title else 'Nenhum titulo progressivo desbloqueado'}",
+        ]
+        if next_title is not None:
+            missing_points = max(0, next_title.required_points - totals["earned"])
+            progress_lines.append(
+                f"**Proximo titulo:** {next_title.name} (faltam `{format_points(missing_points)}` pontos acumulados)"
+            )
+        else:
+            progress_lines.append("**Proximo titulo:** Todos os marcos base ja foram desbloqueados.")
+        if synced_title is not None and synced_role is not None:
+            progress_lines.append(f"**Cargo automatico ativo:** {synced_role.mention} ({synced_title.name})")
+        embed.description = "\n".join(progress_lines)
         embed.add_field(name="Jogador", value=f"{member.mention}\n`{member.id}`", inline=True)
         embed.add_field(name="Saldo", value=f"`{format_points(balance)}` pontos", inline=True)
         embed.add_field(name="Streak diario", value=str(profile.get("daily_streak", 0)), inline=True)
         embed.add_field(name="Total ganho", value=f"`{format_points(totals['earned'])}`", inline=True)
         embed.add_field(name="Total gasto", value=f"`{format_points(totals['spent'])}`", inline=True)
-        embed.add_field(name="Itens no inventario", value=str(sum(int(item["quantity"]) for item in inventory)), inline=True)
+        embed.add_field(
+            name="Itens no inventario",
+            value=str(sum(int(item["quantity"]) for item in inventory) + len(unlocked_titles)),
+            inline=True,
+        )
+        embed.add_field(name="Titulos desbloqueados", value=str(len(unlocked_titles)), inline=True)
         embed.add_field(
             name="Ultimo diario",
             value=format_discord_timestamp(profile.get("last_daily_claim_at"), "R"),
             inline=False,
         )
+        if unlocked_titles:
+            embed.add_field(
+                name="Titulos progressivos",
+                value="\n".join(
+                    f"- {title_info.name} (`{format_points(title_info.required_points)}`)"
+                    for title_info in unlocked_titles[-4:]
+                ),
+                inline=False,
+            )
         if recent_transactions:
             lines = []
             for row in recent_transactions[:5]:
@@ -4400,6 +4743,8 @@ class ClanBot(commands.Bot):
                 winner_tag = str(winner_member) if winner_member else (updated_duel["challenger_tag"] if final_winner_id == updated_duel["challenger_id"] else updated_duel["challenged_tag"])
                 loser_tag = str(loser_member) if loser_member else (updated_duel["challenger_tag"] if loser_id == updated_duel["challenger_id"] else updated_duel["challenged_tag"])
 
+                winner_member_ref = guild.get_member(final_winner_id)
+                winner_balance_before = self.get_apostle_progress_total(guild.id, final_winner_id)
                 winner_balance = self.database.adjust_apostle_balance(guild.id, final_winner_id, winner_tag, stake * 2)
                 self.database.log_apostle_transaction(
                     guild_id=guild.id,
@@ -4420,6 +4765,8 @@ class ClanBot(commands.Bot):
                 )
                 finished_duel = self.database.get_player_duel_by_message(message.id) or updated_duel
                 await message.edit(embed=self.build_player_duel_embed(guild, finished_duel), view=self.player_duel_view)
+                if winner_member_ref is not None:
+                    await self.refresh_apostle_progression(winner_member_ref, previous_total_earned=winner_balance_before)
                 await interaction.response.send_message(
                     f"Resultado confirmado. {winner_member.mention if winner_member else winner_tag} recebeu `{format_points(stake * 2)}` pontos.",
                     ephemeral=True,

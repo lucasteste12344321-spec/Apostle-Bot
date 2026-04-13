@@ -422,6 +422,14 @@ class Database:
                 PRIMARY KEY (guild_id, user_id, action_key)
             );
 
+            CREATE TABLE IF NOT EXISTS apostle_title_roles (
+                guild_id INTEGER NOT NULL,
+                title_key TEXT NOT NULL,
+                role_id INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, title_key)
+            );
+
             CREATE TABLE IF NOT EXISTS player_duels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER NOT NULL,
@@ -1439,6 +1447,66 @@ class Database:
             (guild_id, user_id, limit),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_apostle_user_ids(self, guild_id: int) -> list[int]:
+        rows = self.connection.execute(
+            """
+            SELECT user_id FROM apostle_balances WHERE guild_id = ?
+            UNION
+            SELECT user_id FROM apostle_profiles WHERE guild_id = ?
+            ORDER BY user_id ASC
+            """,
+            (guild_id, guild_id),
+        ).fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    def get_apostle_title_role(self, guild_id: int, title_key: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM apostle_title_roles
+            WHERE guild_id = ? AND title_key = ?
+            """,
+            (guild_id, title_key),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_apostle_title_roles(self, guild_id: int) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM apostle_title_roles
+            WHERE guild_id = ?
+            ORDER BY title_key ASC
+            """,
+            (guild_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_apostle_title_role(self, guild_id: int, title_key: str, role_id: int) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO apostle_title_roles (
+                guild_id,
+                title_key,
+                role_id,
+                updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, title_key) DO UPDATE SET
+                role_id = excluded.role_id,
+                updated_at = excluded.updated_at
+            """,
+            (guild_id, title_key, role_id, utcnow_iso()),
+        )
+        self.connection.commit()
+
+    def delete_apostle_title_role(self, guild_id: int, title_key: str) -> None:
+        self.connection.execute(
+            """
+            DELETE FROM apostle_title_roles
+            WHERE guild_id = ? AND title_key = ?
+            """,
+            (guild_id, title_key),
+        )
+        self.connection.commit()
 
     def create_player_duel(
         self,

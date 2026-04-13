@@ -114,6 +114,7 @@ No `/painel_grades`, os botoes atuais incluem:
 
 - `/configurar_canais`
 - `/configurar_cargos_ajuda`
+- `/configurar_titulos_apostolo`
 - `/configurar_notificacao_ajuda`
 - `/configurar_seguranca`
 - `/painel_ajuda`
@@ -198,13 +199,17 @@ Entrou uma base jogavel de `Pontos de Apostolo` para sustentar desafios, minigam
   - mostra o saldo atual do membro
 
 - `/perfil_apostolo`
-  - mostra saldo, streak, titulo, insignia e historico recente
+  - mostra saldo, streak, titulo equipado, insignia, titulo progressivo atual e historico recente
 
 - `/ranking_pontos`
   - mostra os membros com mais Pontos de Apostolo
 
 - `/ajustar_pontos`
   - comando de staff para adicionar ou remover pontos manualmente
+
+- `/configurar_titulos_apostolo`
+  - vincula cargos automaticos aos titulos progressivos de Pontos de Apostolo
+  - ao configurar, o bot sincroniza os cargos ja conhecidos da economia
 
 - `/diario`
   - resgata a recompensa diaria
@@ -236,9 +241,11 @@ Entrou uma base jogavel de `Pontos de Apostolo` para sustentar desafios, minigam
 
 - `/inventario`
   - mostra os itens comprados
+  - mostra tambem os titulos progressivos ja desbloqueados e os proximos marcos
 
 - `/equipar_item`
   - equipa titulo ou insignia do inventario
+  - aceita tambem os titulos progressivos desbloqueados por pontos
 
 - `/desafiar_jogador`
   - desafia outro jogador no canal atual
@@ -246,6 +253,19 @@ Entrou uma base jogavel de `Pontos de Apostolo` para sustentar desafios, minigam
   - quando aceita, o valor dos dois lados fica travado
   - depois do pvp, os dois precisam confirmar o mesmo vencedor
   - se os dois confirmarem resultados diferentes, o valor e devolvido para ambos
+
+Titulos progressivos base:
+
+- `Apostolo Nivel 1` em `1.000` pontos acumulados
+- `Apostolo Nivel 2` em `2.500` pontos acumulados
+- `Apostolo Nivel 3` em `5.000` pontos acumulados
+- `Apostolo Nivel 4` em `10.000` pontos acumulados
+- `Apostolo Nivel 5` em `20.000` pontos acumulados
+- `Apostolo Nivel 6` em `40.000` pontos acumulados
+
+Observacao:
+
+- Os titulos progressivos usam `total ganho acumulado`, nao o saldo atual. Assim o membro nao perde o titulo ao gastar pontos.
 
 ## Onde os dados ficam salvos
 
