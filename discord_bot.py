@@ -2394,7 +2394,6 @@ class ClanBot(commands.Bot):
         self.grade_panel_view = GradePanelView(self)
         self.grade_test_view = GradeTestTicketView(self)
         self.grade_challenge_view = GradeChallengeTicketView(self)
-        self.player_duel_view = PlayerDuelView(self)
         self.recent_messages: dict[tuple[int, int], deque[datetime]] = defaultdict(lambda: deque(maxlen=8))
         self.recent_joins: dict[int, deque[datetime]] = defaultdict(deque)
         self.recent_raid_alerts: dict[int, datetime] = {}
@@ -2409,7 +2408,7 @@ class ClanBot(commands.Bot):
         self.add_view(self.grade_panel_view)
         self.add_view(self.grade_test_view)
         self.add_view(self.grade_challenge_view)
-        self.add_view(self.player_duel_view)
+        self.add_view(PlayerDuelView(self))
         for panel in self.database.list_help_panels():
             self.add_view(HelpAvailabilityView(self), message_id=panel["message_id"])
             logger.info(
@@ -2500,6 +2499,9 @@ class ClanBot(commands.Bot):
             await interaction.followup.send(message, ephemeral=True)
         else:
             await interaction.response.send_message(message, ephemeral=True)
+
+    def build_player_duel_view(self) -> PlayerDuelView:
+        return PlayerDuelView(self)
 
     def build_apostle_balance_embed(
         self,
@@ -4583,7 +4585,7 @@ class ClanBot(commands.Bot):
         await interaction.response.send_message(
             content=f"{challenger.mention} desafiou {challenged.mention} valendo `{format_points(stake)}` Pontos de Apostolo.",
             embed=embed,
-            view=self.player_duel_view,
+            view=self.build_player_duel_view(),
         )
         message = await interaction.original_response()
         self.database.create_player_duel(
@@ -4626,7 +4628,7 @@ class ClanBot(commands.Bot):
         if challenger_balance < stake or challenged_balance < stake:
             self.database.update_player_duel_status(message.id, status="cancelled", finished=True)
             updated_duel = self.database.get_player_duel_by_message(message.id) or duel
-            await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
+            await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.build_player_duel_view())
             await self.send_ephemeral_response(interaction, "Um dos lados nao tem mais saldo suficiente. O desafio foi cancelado.")
             return
 
@@ -4675,7 +4677,7 @@ class ClanBot(commands.Bot):
         )
         self.database.update_player_duel_status(message.id, status="active", accepted=True)
         updated_duel = self.database.get_player_duel_by_message(message.id) or duel
-        await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
+        await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.build_player_duel_view())
         await self.send_ephemeral_response(
             interaction,
             f"Desafio aceito. `{format_points(stake)}` pontos de cada lado foram travados. Depois da luta, confirmem o vencedor nos botoes.",
@@ -4705,7 +4707,7 @@ class ClanBot(commands.Bot):
 
         self.database.update_player_duel_status(message.id, status="declined", finished=True)
         updated_duel = self.database.get_player_duel_by_message(message.id) or duel
-        await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
+        await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.build_player_duel_view())
         await self.send_ephemeral_response(interaction, "Desafio recusado.")
 
     async def vote_player_duel_from_interaction(self, interaction: discord.Interaction, *, winner_side: str) -> None:
@@ -4773,7 +4775,7 @@ class ClanBot(commands.Bot):
                     finished=True,
                 )
                 finished_duel = self.database.get_player_duel_by_message(message.id) or updated_duel
-                await message.edit(embed=self.build_player_duel_embed(guild, finished_duel), view=self.player_duel_view)
+                await message.edit(embed=self.build_player_duel_embed(guild, finished_duel), view=self.build_player_duel_view())
                 if winner_member_ref is not None:
                     await self.refresh_apostle_progression(winner_member_ref, previous_total_earned=winner_balance_before)
                 await self.send_ephemeral_response(
@@ -4818,14 +4820,14 @@ class ClanBot(commands.Bot):
             )
             self.database.update_player_duel_status(message.id, status="disputed", finished=True)
             disputed_duel = self.database.get_player_duel_by_message(message.id) or updated_duel
-            await message.edit(embed=self.build_player_duel_embed(guild, disputed_duel), view=self.player_duel_view)
+            await message.edit(embed=self.build_player_duel_embed(guild, disputed_duel), view=self.build_player_duel_view())
             await self.send_ephemeral_response(
                 interaction,
                 "Os dois lados marcaram vencedores diferentes. O duelo foi contestado e os pontos foram devolvidos.",
             )
             return
 
-        await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
+        await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.build_player_duel_view())
         await self.send_ephemeral_response(
             interaction,
             "Sua confirmacao foi registrada. Agora falta o outro jogador confirmar o mesmo vencedor.",
