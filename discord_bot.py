@@ -2495,6 +2495,12 @@ class ClanBot(commands.Bot):
         role_id = self.get_feature_settings(guild.id)["help_notify_role_id"]
         return guild.get_role(role_id) if role_id else None
 
+    async def send_ephemeral_response(self, interaction: discord.Interaction, message: str) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
     def build_apostle_balance_embed(
         self,
         *,
@@ -4596,21 +4602,23 @@ class ClanBot(commands.Bot):
         channel = interaction.channel
         message = interaction.message
         if guild is None or not isinstance(channel, discord.TextChannel) or message is None:
-            await interaction.response.send_message("Esse botao so funciona no servidor.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Esse botao so funciona no servidor.")
             return
 
         duel = self.database.get_player_duel_by_message(message.id)
         if duel is None:
-            await interaction.response.send_message("Nao encontrei esse desafio.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Nao encontrei esse desafio.")
             return
 
         member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
         if member is None or member.id != duel["challenged_id"]:
-            await interaction.response.send_message("So o jogador desafiado pode aceitar.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "So o jogador desafiado pode aceitar.")
             return
         if duel["status"] != "pending":
-            await interaction.response.send_message("Esse desafio nao esta mais pendente.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Esse desafio nao esta mais pendente.")
             return
+
+        await interaction.response.defer(ephemeral=True)
 
         challenger_balance = self.get_apostle_balance(guild.id, duel["challenger_id"])
         challenged_balance = self.get_apostle_balance(guild.id, duel["challenged_id"])
@@ -4619,10 +4627,7 @@ class ClanBot(commands.Bot):
             self.database.update_player_duel_status(message.id, status="cancelled", finished=True)
             updated_duel = self.database.get_player_duel_by_message(message.id) or duel
             await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
-            await interaction.response.send_message(
-                "Um dos lados nao tem mais saldo suficiente. O desafio foi cancelado.",
-                ephemeral=True,
-            )
+            await self.send_ephemeral_response(interaction, "Um dos lados nao tem mais saldo suficiente. O desafio foi cancelado.")
             return
 
         challenger_new_balance = self.database.adjust_apostle_balance(
@@ -4632,7 +4637,7 @@ class ClanBot(commands.Bot):
             -stake,
         )
         if challenger_new_balance is None:
-            await interaction.response.send_message("O desafiante nao tem mais saldo suficiente.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "O desafiante nao tem mais saldo suficiente.")
             return
 
         challenged_new_balance = self.database.adjust_apostle_balance(
@@ -4643,7 +4648,7 @@ class ClanBot(commands.Bot):
         )
         if challenged_new_balance is None:
             self.database.adjust_apostle_balance(guild.id, duel["challenger_id"], duel["challenger_tag"], stake)
-            await interaction.response.send_message("Voce nao tem mais saldo suficiente para aceitar.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Voce nao tem mais saldo suficiente para aceitar.")
             return
 
         self.database.log_apostle_transaction(
@@ -4671,60 +4676,64 @@ class ClanBot(commands.Bot):
         self.database.update_player_duel_status(message.id, status="active", accepted=True)
         updated_duel = self.database.get_player_duel_by_message(message.id) or duel
         await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
-        await interaction.response.send_message(
+        await self.send_ephemeral_response(
+            interaction,
             f"Desafio aceito. `{format_points(stake)}` pontos de cada lado foram travados. Depois da luta, confirmem o vencedor nos botoes.",
-            ephemeral=True,
         )
 
     async def decline_player_duel_from_interaction(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         message = interaction.message
         if guild is None or message is None:
-            await interaction.response.send_message("Esse botao so funciona no servidor.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Esse botao so funciona no servidor.")
             return
 
         duel = self.database.get_player_duel_by_message(message.id)
         if duel is None:
-            await interaction.response.send_message("Nao encontrei esse desafio.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Nao encontrei esse desafio.")
             return
 
         member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
         if member is None or member.id != duel["challenged_id"]:
-            await interaction.response.send_message("So o jogador desafiado pode recusar.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "So o jogador desafiado pode recusar.")
             return
         if duel["status"] != "pending":
-            await interaction.response.send_message("Esse desafio nao esta mais pendente.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Esse desafio nao esta mais pendente.")
             return
+
+        await interaction.response.defer(ephemeral=True)
 
         self.database.update_player_duel_status(message.id, status="declined", finished=True)
         updated_duel = self.database.get_player_duel_by_message(message.id) or duel
         await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
-        await interaction.response.send_message("Desafio recusado.", ephemeral=True)
+        await self.send_ephemeral_response(interaction, "Desafio recusado.")
 
     async def vote_player_duel_from_interaction(self, interaction: discord.Interaction, *, winner_side: str) -> None:
         guild = interaction.guild
         message = interaction.message
         if guild is None or message is None:
-            await interaction.response.send_message("Esse botao so funciona no servidor.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Esse botao so funciona no servidor.")
             return
 
         duel = self.database.get_player_duel_by_message(message.id)
         if duel is None:
-            await interaction.response.send_message("Nao encontrei esse desafio.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Nao encontrei esse desafio.")
             return
         if duel["status"] != "active":
-            await interaction.response.send_message("Esse desafio nao esta ativo para confirmar resultado.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Esse desafio nao esta ativo para confirmar resultado.")
             return
 
         member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
         if member is None or member.id not in {duel["challenger_id"], duel["challenged_id"]}:
-            await interaction.response.send_message("So os dois jogadores podem confirmar o resultado.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "So os dois jogadores podem confirmar o resultado.")
             return
 
         existing_vote = duel["challenger_vote_winner_id"] if member.id == duel["challenger_id"] else duel["challenged_vote_winner_id"]
         if existing_vote:
-            await interaction.response.send_message("Voce ja confirmou um resultado nesse duelo.", ephemeral=True)
+            await self.send_ephemeral_response(interaction, "Voce ja confirmou um resultado nesse duelo.")
             return
+
+        await interaction.response.defer(ephemeral=True)
 
         winner_id = duel["challenger_id"] if winner_side == "challenger" else duel["challenged_id"]
         self.database.record_player_duel_vote(message.id, voter_id=member.id, winner_id=winner_id)
@@ -4767,9 +4776,9 @@ class ClanBot(commands.Bot):
                 await message.edit(embed=self.build_player_duel_embed(guild, finished_duel), view=self.player_duel_view)
                 if winner_member_ref is not None:
                     await self.refresh_apostle_progression(winner_member_ref, previous_total_earned=winner_balance_before)
-                await interaction.response.send_message(
+                await self.send_ephemeral_response(
+                    interaction,
                     f"Resultado confirmado. {winner_member.mention if winner_member else winner_tag} recebeu `{format_points(stake * 2)}` pontos.",
-                    ephemeral=True,
                 )
                 return
 
@@ -4810,16 +4819,16 @@ class ClanBot(commands.Bot):
             self.database.update_player_duel_status(message.id, status="disputed", finished=True)
             disputed_duel = self.database.get_player_duel_by_message(message.id) or updated_duel
             await message.edit(embed=self.build_player_duel_embed(guild, disputed_duel), view=self.player_duel_view)
-            await interaction.response.send_message(
+            await self.send_ephemeral_response(
+                interaction,
                 "Os dois lados marcaram vencedores diferentes. O duelo foi contestado e os pontos foram devolvidos.",
-                ephemeral=True,
             )
             return
 
         await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
-        await interaction.response.send_message(
+        await self.send_ephemeral_response(
+            interaction,
             "Sua confirmacao foi registrada. Agora falta o outro jogador confirmar o mesmo vencedor.",
-            ephemeral=True,
         )
 
     async def ensure_help_roles(self, guild: discord.Guild) -> tuple[discord.Role, discord.Role]:
