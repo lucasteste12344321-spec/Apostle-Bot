@@ -130,6 +130,22 @@ No `/painel_grades`, os botoes atuais incluem:
 - `/blacklist_lista`
 - `/presenca`
 - `/presencas`
+- `/saldo`
+- `/perfil_apostolo`
+- `/ranking_pontos`
+- `/ajustar_pontos`
+- `/diario`
+- `/pagar`
+- `/trabalhar`
+- `/cacada`
+- `/ritual`
+- `/cara_ou_coroa`
+- `/dado`
+- `/loja`
+- `/comprar`
+- `/inventario`
+- `/equipar_item`
+- `/desafiar_jogador`
 - `/historico_membro`
 - `/historico_reports`
 - `/historico_grade`
@@ -173,6 +189,63 @@ Observacoes:
 - Se o cargo de arbitro tiver acento, o ideal e definir `REFEREE_ROLE_ID`.
 - Para saber quem esta `online/offline` de verdade entre os avaliadores, o bot precisaria do `Presence Intent`. Sem isso, ele registra a demanda sem afirmar quem estava offline.
 - Se o canal de avaliacoes nao for configurado, o bot usa o canal de logs como fallback para arquivar as fichas finais.
+
+## Economia base e duelo pvp
+
+Entrou uma base jogavel de `Pontos de Apostolo` para sustentar desafios, minigames e interacao diaria:
+
+- `/saldo`
+  - mostra o saldo atual do membro
+
+- `/perfil_apostolo`
+  - mostra saldo, streak, titulo, insignia e historico recente
+
+- `/ranking_pontos`
+  - mostra os membros com mais Pontos de Apostolo
+
+- `/ajustar_pontos`
+  - comando de staff para adicionar ou remover pontos manualmente
+
+- `/diario`
+  - resgata a recompensa diaria
+  - tem streak com bonus crescente
+
+- `/pagar`
+  - transfere pontos para outro membro
+
+- `/trabalhar`
+  - gera pontos por contrato com cooldown
+
+- `/cacada`
+  - minigame de risco e recompensa com cooldown
+
+- `/ritual`
+  - aposta uma quantia em um ritual arriscado
+
+- `/cara_ou_coroa`
+  - minigame simples com ou sem aposta
+
+- `/dado`
+  - aposta em um numero de 1 a 6
+
+- `/loja`
+  - mostra os itens cosmeticos da economia
+
+- `/comprar`
+  - compra um item da loja
+
+- `/inventario`
+  - mostra os itens comprados
+
+- `/equipar_item`
+  - equipa titulo ou insignia do inventario
+
+- `/desafiar_jogador`
+  - desafia outro jogador no canal atual
+  - o desafiado so consegue aceitar se os dois lados ainda tiverem a quantia
+  - quando aceita, o valor dos dois lados fica travado
+  - depois do pvp, os dois precisam confirmar o mesmo vencedor
+  - se os dois confirmarem resultados diferentes, o valor e devolvido para ambos
 
 ## Onde os dados ficam salvos
 

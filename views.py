@@ -133,6 +133,62 @@ class HelpAvailabilityView(discord.ui.View):
         await self._update_status(interaction, available=False)
 
 
+class PlayerDuelView(discord.ui.View):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    async def _send_ephemeral(self, interaction: discord.Interaction, message: str) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
+    @discord.ui.button(label="Aceitar desafio", style=discord.ButtonStyle.success, custom_id="player_duel:accept", row=0)
+    async def accept_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.accept_player_duel_from_interaction(interaction)
+
+    @discord.ui.button(label="Recusar desafio", style=discord.ButtonStyle.danger, custom_id="player_duel:decline", row=0)
+    async def decline_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.decline_player_duel_from_interaction(interaction)
+
+    @discord.ui.button(label="Vitoria do desafiante", style=discord.ButtonStyle.primary, custom_id="player_duel:challenger_win", row=1)
+    async def challenger_win_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.vote_player_duel_from_interaction(interaction, winner_side="challenger")
+
+    @discord.ui.button(label="Vitoria do desafiado", style=discord.ButtonStyle.secondary, custom_id="player_duel:challenged_win", row=1)
+    async def challenged_win_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.vote_player_duel_from_interaction(interaction, winner_side="challenged")
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[discord.ui.View]) -> None:
+        del item
+        logger.exception("Erro no duelo entre jogadores", exc_info=error)
+        await self._send_ephemeral(
+            interaction,
+            "Nao consegui concluir essa acao do duelo agora. Tente novamente em instantes.",
+        )
+
+
 class ReportTicketView(discord.ui.View):
     def __init__(self, bot: "ClanBot") -> None:
         super().__init__(timeout=None)

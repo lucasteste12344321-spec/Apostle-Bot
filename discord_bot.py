@@ -9,6 +9,7 @@ from io import BytesIO
 import json
 import logging
 from pathlib import Path
+import random
 import re
 from typing import Any
 import unicodedata
@@ -24,6 +25,7 @@ from views import (
     GradePanelView,
     GradeTestTicketView,
     HelpAvailabilityView,
+    PlayerDuelView,
     ReportTicketView,
     TicketPanelView,
 )
@@ -57,6 +59,17 @@ class InviteState:
             created_at=invite.created_at.isoformat(timespec="seconds") if invite.created_at else None,
             expires_at=invite.expires_at.isoformat(timespec="seconds") if invite.expires_at else None,
         )
+
+
+@dataclass(slots=True, frozen=True)
+class ApostleShopItem:
+    key: str
+    name: str
+    price: int
+    description: str
+    category: str
+    grant_title: str | None = None
+    grant_badge: str | None = None
 
 
 def trim_text(value: str | None, limit: int = 1000) -> str:
@@ -157,6 +170,62 @@ def format_grade_result_label(grade_name: str | None, subtier_name: str | None) 
     if grade_name and subtier_name:
         return f"{grade_name} | {subtier_name}"
     return grade_name or subtier_name or "Nao definido"
+
+
+def format_points(value: int) -> str:
+    return f"{value:,}".replace(",", ".")
+
+
+APOSTLE_DAILY_BASE = 150
+APOSTLE_DAILY_STREAK_STEP = 25
+APOSTLE_DAILY_STREAK_MAX_BONUS = 250
+APOSTLE_PAY_MINIMUM = 25
+APOSTLE_WORK_COOLDOWN = timedelta(hours=2)
+APOSTLE_HUNT_COOLDOWN = timedelta(hours=1)
+APOSTLE_DAILY_COOLDOWN = timedelta(days=1)
+
+APOSTLE_SHOP_ITEMS: tuple[ApostleShopItem, ...] = (
+    ApostleShopItem(
+        key="titulo_marcado",
+        name="Titulo: Marcado",
+        price=600,
+        description="Exibe o titulo `Marcado` no perfil de apostolo.",
+        category="Titulo",
+        grant_title="Marcado",
+    ),
+    ApostleShopItem(
+        key="titulo_algoz",
+        name="Titulo: Algoz da God Hand",
+        price=1400,
+        description="Exibe o titulo `Algoz da God Hand` no perfil de apostolo.",
+        category="Titulo",
+        grant_title="Algoz da God Hand",
+    ),
+    ApostleShopItem(
+        key="titulo_rei",
+        name="Titulo: Rei dos Apostolos",
+        price=3000,
+        description="Exibe o titulo `Rei dos Apostolos` no perfil.",
+        category="Titulo",
+        grant_title="Rei dos Apostolos",
+    ),
+    ApostleShopItem(
+        key="insignia_behelit",
+        name="Insignia: Behelit Carmesim",
+        price=900,
+        description="Desbloqueia a insignia `Behelit Carmesim` no perfil.",
+        category="Insignia",
+        grant_badge="Behelit Carmesim",
+    ),
+    ApostleShopItem(
+        key="insignia_mao",
+        name="Insignia: Mao da Ruina",
+        price=1800,
+        description="Desbloqueia a insignia `Mao da Ruina` no perfil.",
+        category="Insignia",
+        grant_badge="Mao da Ruina",
+    ),
+)
 
 
 def ticket_type_label(ticket_type: str) -> str:
@@ -1421,6 +1490,587 @@ class ClanCog(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="saldo", description="Mostra seu saldo de Pontos de Apostolo.")
+    async def saldo(self, interaction: discord.Interaction, usuario: discord.Member | None = None) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        target = usuario or interaction.user
+        if not isinstance(target, discord.Member):
+            await interaction.response.send_message("Nao consegui identificar o membro.", ephemeral=True)
+            return
+
+        balance = self.bot.get_apostle_balance(guild.id, target.id)
+        embed = self.bot.build_apostle_balance_embed(member=target, balance=balance)
+        await interaction.response.send_message(embed=embed, ephemeral=usuario is None)
+
+    @app_commands.command(name="perfil_apostolo", description="Mostra seu perfil de Pontos de Apostolo.")
+    async def perfil_apostolo(self, interaction: discord.Interaction, usuario: discord.Member | None = None) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        target = usuario or interaction.user
+        if not isinstance(target, discord.Member):
+            await interaction.response.send_message("Nao consegui identificar o membro.", ephemeral=True)
+            return
+
+        embed = self.bot.build_apostle_profile_embed(target)
+        await interaction.response.send_message(embed=embed, ephemeral=usuario is None)
+
+    @app_commands.command(name="diario", description="Resgata seus Pontos de Apostolo diarios.")
+    async def diario(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        profile = self.bot.get_apostle_profile(guild.id, member.id, str(member))
+        now = discord.utils.utcnow()
+        now_iso = now.isoformat(timespec="seconds")
+        last_claim = parse_iso_datetime(profile.get("last_daily_claim_at"))
+
+        if last_claim is not None:
+            if last_claim.tzinfo is None:
+                last_claim = last_claim.replace(tzinfo=timezone.utc)
+            if last_claim.date() == now.date():
+                next_claim = (last_claim + APOSTLE_DAILY_COOLDOWN).replace(hour=0, minute=0, second=0, microsecond=0)
+                if next_claim <= now:
+                    next_claim = now + timedelta(hours=12)
+                await interaction.response.send_message(
+                    f"Voce ja resgatou seu diario hoje. Tente de novo {discord.utils.format_dt(next_claim, 'R')}.",
+                    ephemeral=True,
+                )
+                return
+
+        streak = 1
+        if last_claim is not None and (now.date() - last_claim.date()).days == 1:
+            streak = int(profile.get("daily_streak", 0)) + 1
+        elif last_claim is not None and (now.date() - last_claim.date()).days == 0:
+            streak = int(profile.get("daily_streak", 0))
+
+        bonus = min(APOSTLE_DAILY_STREAK_MAX_BONUS, max(0, streak - 1) * APOSTLE_DAILY_STREAK_STEP)
+        reward = APOSTLE_DAILY_BASE + bonus
+        new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), reward)
+        self.bot.database.upsert_apostle_profile(
+            guild_id=guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            daily_streak=streak,
+            last_daily_claim_at=now_iso,
+        )
+        self.bot.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            amount=reward,
+            transaction_type="daily_claim",
+            details=f"Streak {streak}",
+            balance_after=new_balance,
+        )
+
+        embed = self.build_embed("Diario resgatado", color=discord.Color.green())
+        embed.description = "A God Hand observou sua presenca e deixou uma oferenda."
+        embed.add_field(name="Recompensa base", value=f"`{format_points(APOSTLE_DAILY_BASE)}`", inline=True)
+        embed.add_field(name="Bonus de streak", value=f"`{format_points(bonus)}`", inline=True)
+        embed.add_field(name="Total ganho", value=f"`{format_points(reward)}`", inline=True)
+        embed.add_field(name="Streak atual", value=str(streak), inline=True)
+        embed.add_field(name="Novo saldo", value=f"`{format_points(new_balance or 0)}`", inline=True)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="pagar", description="Transfere Pontos de Apostolo para outro jogador.")
+    async def pagar(self, interaction: discord.Interaction, usuario: discord.Member, quantia: int) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        if usuario.bot:
+            await interaction.response.send_message("Nao da para transferir pontos para bots.", ephemeral=True)
+            return
+        if usuario.id == member.id:
+            await interaction.response.send_message("Voce nao pode pagar a si mesmo.", ephemeral=True)
+            return
+        if quantia < APOSTLE_PAY_MINIMUM:
+            await interaction.response.send_message(
+                f"O minimo para transferir e `{format_points(APOSTLE_PAY_MINIMUM)}` pontos.",
+                ephemeral=True,
+            )
+            return
+
+        sender_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), -quantia)
+        if sender_balance is None:
+            await interaction.response.send_message("Voce nao tem saldo suficiente para essa transferencia.", ephemeral=True)
+            return
+
+        receiver_balance = self.bot.database.adjust_apostle_balance(guild.id, usuario.id, str(usuario), quantia)
+        self.bot.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            amount=-quantia,
+            transaction_type="player_payment",
+            details="Transferencia enviada",
+            counterparty_id=usuario.id,
+            counterparty_tag=str(usuario),
+            balance_after=sender_balance,
+        )
+        self.bot.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=usuario.id,
+            user_tag=str(usuario),
+            amount=quantia,
+            transaction_type="player_payment",
+            details="Transferencia recebida",
+            counterparty_id=member.id,
+            counterparty_tag=str(member),
+            balance_after=receiver_balance,
+        )
+
+        embed = self.build_embed("Transferencia concluida", color=discord.Color.blurple())
+        embed.add_field(name="De", value=member.mention, inline=True)
+        embed.add_field(name="Para", value=usuario.mention, inline=True)
+        embed.add_field(name="Valor", value=f"`{format_points(quantia)}`", inline=True)
+        embed.add_field(name="Seu saldo agora", value=f"`{format_points(sender_balance or 0)}`", inline=False)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="trabalhar", description="Cumpre um contrato e ganha Pontos de Apostolo.")
+    async def trabalhar(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        remaining = self.bot.get_action_cooldown_remaining(guild.id, member.id, "work")
+        if remaining is not None:
+            next_time = discord.utils.utcnow() + remaining
+            await interaction.response.send_message(
+                f"Voce ja cumpriu um contrato recente. Tente de novo {discord.utils.format_dt(next_time, 'R')}.",
+                ephemeral=True,
+            )
+            return
+
+        reward = random.randint(120, 280)
+        flavor = random.choice(
+            [
+                "Voce negociou um contrato sombrio nas sombras de Midland.",
+                "Voce caçou um desertor e recebeu sua parte.",
+                "Voce escoltou um carregamento amaldiçoado sem fazer perguntas.",
+            ]
+        )
+        new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), reward)
+        self.bot.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            amount=reward,
+            transaction_type="work_contract",
+            details=flavor,
+            balance_after=new_balance,
+        )
+        self.bot.database.set_apostle_cooldown(
+            guild.id,
+            member.id,
+            "work",
+            (discord.utils.utcnow() + APOSTLE_WORK_COOLDOWN).isoformat(timespec="seconds"),
+        )
+        await interaction.response.send_message(
+            f"{flavor}\nVoce ganhou `{format_points(reward)}` Pontos de Apostolo.",
+        )
+
+    @app_commands.command(name="cacada", description="Parte para uma cacada por Pontos de Apostolo.")
+    async def cacada(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        remaining = self.bot.get_action_cooldown_remaining(guild.id, member.id, "hunt")
+        if remaining is not None:
+            next_time = discord.utils.utcnow() + remaining
+            await interaction.response.send_message(
+                f"Voce ainda esta se recuperando da ultima cacada. Tente de novo {discord.utils.format_dt(next_time, 'R')}.",
+                ephemeral=True,
+            )
+            return
+
+        roll = random.random()
+        if roll < 0.65:
+            reward = random.randint(90, 240)
+            text = random.choice(
+                [
+                    "Voce encontrou um grupo perdido e arrancou um tributo deles.",
+                    "Voce rastreou uma presa valiosa entre as ruinas.",
+                    "Voce voltou da cacada com algo que valeu a pena.",
+                ]
+            )
+        elif roll < 0.9:
+            reward = random.randint(241, 420)
+            text = random.choice(
+                [
+                    "Voce voltou da cacada coberto de sangue, mas muito mais rico.",
+                    "A presa era perigosa, mas a recompensa foi ainda melhor.",
+                    "Voce encontrou um Behelit quebrado e vendeu as peças por uma fortuna.",
+                ]
+            )
+        else:
+            reward = -random.randint(40, 140)
+            text = random.choice(
+                [
+                    "A cacada deu errado e voce precisou comprar suprimentos para voltar vivo.",
+                    "Voce caiu numa emboscada e saiu no prejuizo.",
+                    "A presa escapou e deixou apenas despesas para tras.",
+                ]
+            )
+
+        new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), reward)
+        if new_balance is None:
+            reward = 0
+            new_balance = self.bot.get_apostle_balance(guild.id, member.id)
+            text = "A cacada foi um fracasso, mas seu saldo nao podia ficar negativo."
+
+        self.bot.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            amount=reward,
+            transaction_type="hunt_run",
+            details=text,
+            balance_after=new_balance,
+        )
+        self.bot.database.set_apostle_cooldown(
+            guild.id,
+            member.id,
+            "hunt",
+            (discord.utils.utcnow() + APOSTLE_HUNT_COOLDOWN).isoformat(timespec="seconds"),
+        )
+        verb = "ganhou" if reward >= 0 else "perdeu"
+        await interaction.response.send_message(
+            f"{text}\nVoce {verb} `{format_points(abs(reward))}` Pontos de Apostolo.",
+        )
+
+    @app_commands.command(name="ritual", description="Aposta Pontos de Apostolo em um ritual arriscado.")
+    async def ritual(self, interaction: discord.Interaction, quantia: int) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        if quantia <= 0:
+            await interaction.response.send_message("A quantia precisa ser maior que zero.", ephemeral=True)
+            return
+
+        current_balance = self.bot.get_apostle_balance(guild.id, member.id)
+        if current_balance < quantia:
+            await interaction.response.send_message("Voce nao tem saldo suficiente para esse ritual.", ephemeral=True)
+            return
+
+        roll = random.random()
+        if roll < 0.5:
+            delta = -quantia
+            text = "O ritual falhou e a oferenda foi consumida no vazio."
+        elif roll < 0.85:
+            delta = int(quantia * 1.5)
+            text = "O ritual foi aceito. A escuridao devolveu mais do que tomou."
+        else:
+            delta = int(quantia * 3)
+            text = "O Behelit sorriu para voce. O ritual explodiu em lucro profano."
+
+        new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), delta)
+        self.bot.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            amount=delta,
+            transaction_type="ritual",
+            details=f"Ritual com aposta base de {quantia}",
+            balance_after=new_balance,
+        )
+        verb = "ganhou" if delta >= 0 else "perdeu"
+        await interaction.response.send_message(
+            f"{text}\nVoce {verb} `{format_points(abs(delta))}` Pontos de Apostolo.",
+        )
+
+    @app_commands.command(name="cara_ou_coroa", description="Joga cara ou coroa com ou sem aposta.")
+    async def cara_ou_coroa(self, interaction: discord.Interaction, escolha: str, aposta: int | None = None) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        normalized_choice = normalize_lookup_text(escolha)
+        if normalized_choice not in {"cara", "coroa"}:
+            await interaction.response.send_message("Escolha `cara` ou `coroa`.", ephemeral=True)
+            return
+
+        result = random.choice(["cara", "coroa"])
+        if aposta is None or aposta <= 0:
+            await interaction.response.send_message(f"A moeda caiu em **{result}**.")
+            return
+
+        current_balance = self.bot.get_apostle_balance(guild.id, member.id)
+        if current_balance < aposta:
+            await interaction.response.send_message("Voce nao tem saldo suficiente para apostar isso.", ephemeral=True)
+            return
+
+        delta = aposta if normalized_choice == result else -aposta
+        new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), delta)
+        self.bot.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            amount=delta,
+            transaction_type="coinflip",
+            details=f"Escolheu {normalized_choice}, caiu {result}",
+            balance_after=new_balance,
+        )
+        verb = "ganhou" if delta > 0 else "perdeu"
+        await interaction.response.send_message(
+            f"A moeda caiu em **{result}**. Voce {verb} `{format_points(abs(delta))}` Pontos de Apostolo.",
+        )
+
+    @app_commands.command(name="dado", description="Aposte em um numero de 1 a 6.")
+    async def dado(self, interaction: discord.Interaction, numero: int, aposta: int | None = None) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        if numero < 1 or numero > 6:
+            await interaction.response.send_message("Escolha um numero de 1 a 6.", ephemeral=True)
+            return
+
+        result = random.randint(1, 6)
+        if aposta is None or aposta <= 0:
+            await interaction.response.send_message(f"O dado rolou e caiu em **{result}**.")
+            return
+
+        current_balance = self.bot.get_apostle_balance(guild.id, member.id)
+        if current_balance < aposta:
+            await interaction.response.send_message("Voce nao tem saldo suficiente para apostar isso.", ephemeral=True)
+            return
+
+        delta = aposta * 5 if result == numero else -aposta
+        new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), delta)
+        self.bot.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            amount=delta,
+            transaction_type="dice_bet",
+            details=f"Escolheu {numero}, caiu {result}",
+            balance_after=new_balance,
+        )
+        verb = "ganhou" if delta > 0 else "perdeu"
+        await interaction.response.send_message(
+            f"O dado caiu em **{result}**. Voce {verb} `{format_points(abs(delta))}` Pontos de Apostolo.",
+        )
+
+    @app_commands.command(name="loja", description="Mostra a loja de Pontos de Apostolo.")
+    async def loja(self, interaction: discord.Interaction) -> None:
+        embed = self.build_embed("Loja da God Hand", color=discord.Color.dark_purple())
+        embed.description = "Use `/comprar item:<nome ou chave>` para adquirir um item."
+        for item in APOSTLE_SHOP_ITEMS:
+            embed.add_field(
+                name=f"{item.name} | `{item.key}`",
+                value=f"{item.description}\nCategoria: {item.category}\nPreco: `{format_points(item.price)}`",
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="comprar", description="Compra um item da loja da God Hand.")
+    async def comprar(self, interaction: discord.Interaction, item: str) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        shop_item = self.bot.get_apostle_shop_item(item)
+        if shop_item is None:
+            await interaction.response.send_message("Nao encontrei esse item na loja.", ephemeral=True)
+            return
+
+        current_balance = self.bot.get_apostle_balance(guild.id, member.id)
+        if current_balance < shop_item.price:
+            await interaction.response.send_message("Voce nao tem Pontos de Apostolo suficientes para comprar isso.", ephemeral=True)
+            return
+
+        new_balance = self.bot.database.adjust_apostle_balance(guild.id, member.id, str(member), -shop_item.price)
+        self.bot.database.add_apostle_item(guild.id, member.id, shop_item.key, shop_item.name, 1)
+        self.bot.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            amount=-shop_item.price,
+            transaction_type="shop_purchase",
+            details=shop_item.key,
+            balance_after=new_balance,
+        )
+        await interaction.response.send_message(
+            f"Voce comprou **{shop_item.name}** por `{format_points(shop_item.price)}` pontos.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="inventario", description="Mostra seu inventario de itens da economia.")
+    async def inventario(self, interaction: discord.Interaction, usuario: discord.Member | None = None) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        target = usuario or interaction.user
+        if not isinstance(target, discord.Member):
+            await interaction.response.send_message("Nao consegui identificar o membro.", ephemeral=True)
+            return
+
+        inventory = self.bot.database.list_apostle_inventory(guild.id, target.id)
+        if not inventory:
+            await interaction.response.send_message("O inventario ainda esta vazio.", ephemeral=True)
+            return
+
+        embed = self.build_embed("Inventario de Apostolo", color=discord.Color.dark_orange())
+        embed.description = f"Itens de {target.mention}."
+        for item in inventory[:15]:
+            embed.add_field(
+                name=item["item_name"],
+                value=f"Chave: `{item['item_key']}`\nQuantidade: `{item['quantity']}`",
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=usuario is None)
+
+    @app_commands.command(name="equipar_item", description="Equipa um titulo ou insignia do seu inventario.")
+    async def equipar_item(self, interaction: discord.Interaction, item: str) -> None:
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = interaction.user
+        shop_item = self.bot.get_apostle_shop_item(item)
+        if shop_item is None:
+            await interaction.response.send_message("Nao encontrei esse item cadastrrado para equipar.", ephemeral=True)
+            return
+
+        owned = self.bot.database.get_apostle_inventory_item(guild.id, member.id, shop_item.key)
+        if owned is None or owned["quantity"] <= 0:
+            await interaction.response.send_message("Voce ainda nao possui esse item no inventario.", ephemeral=True)
+            return
+
+        update_kwargs: dict[str, Any] = {
+            "guild_id": guild.id,
+            "user_id": member.id,
+            "user_tag": str(member),
+        }
+        equipped_parts = []
+        if shop_item.grant_title:
+            update_kwargs["selected_title"] = shop_item.grant_title
+            equipped_parts.append(f"titulo `{shop_item.grant_title}`")
+        if shop_item.grant_badge:
+            update_kwargs["selected_badge"] = shop_item.grant_badge
+            equipped_parts.append(f"insignia `{shop_item.grant_badge}`")
+        if len(update_kwargs) == 3:
+            await interaction.response.send_message("Esse item nao possui nada para equipar ainda.", ephemeral=True)
+            return
+
+        self.bot.database.upsert_apostle_profile(**update_kwargs)
+        await interaction.response.send_message(
+            f"Voce equipou {' e '.join(equipped_parts)}.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="ranking_pontos", description="Mostra o ranking de Pontos de Apostolo.")
+    async def ranking_pontos(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        rows = self.bot.database.list_top_apostle_balances(interaction.guild.id, limit=10)
+        if not rows:
+            await interaction.response.send_message("Ainda nao ha Pontos de Apostolo registrados.", ephemeral=True)
+            return
+
+        lines = []
+        for index, row in enumerate(rows, start=1):
+            member = interaction.guild.get_member(row["user_id"])
+            display_name = member.mention if member else row["user_tag"]
+            lines.append(f"**{index}.** {display_name} - `{format_points(int(row['balance']))}`")
+
+        embed = self.build_embed("Ranking de Pontos de Apostolo", color=discord.Color.gold())
+        embed.description = "\n".join(lines)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="ajustar_pontos", description="Adiciona ou remove Pontos de Apostolo de um membro.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def ajustar_pontos(
+        self,
+        interaction: discord.Interaction,
+        usuario: discord.Member,
+        quantia: int,
+        motivo: str | None = None,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        if quantia == 0:
+            await interaction.response.send_message("Informe uma quantia diferente de zero.", ephemeral=True)
+            return
+
+        new_balance = self.bot.database.adjust_apostle_balance(interaction.guild.id, usuario.id, str(usuario), quantia)
+        if new_balance is None:
+            await interaction.response.send_message(
+                "Essa remocao deixaria o saldo negativo. Ajuste a quantia.",
+                ephemeral=True,
+            )
+            return
+
+        self.bot.database.log_apostle_transaction(
+            guild_id=interaction.guild.id,
+            user_id=usuario.id,
+            user_tag=str(usuario),
+            amount=quantia,
+            transaction_type="admin_adjustment",
+            details=motivo or "Ajuste manual da staff",
+            counterparty_id=interaction.user.id,
+            counterparty_tag=str(interaction.user),
+            balance_after=new_balance,
+        )
+
+        action_word = "adicionados" if quantia > 0 else "removidos"
+        await interaction.response.send_message(
+            f"`{format_points(abs(quantia))}` pontos {action_word} para {usuario.mention}. Novo saldo: `{format_points(new_balance)}`.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="desafiar_jogador", description="Desafia outro jogador para um pvp apostando Pontos de Apostolo.")
+    async def desafiar_jogador(
+        self,
+        interaction: discord.Interaction,
+        jogador: discord.Member,
+        quantia: int,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        await self.bot.create_player_duel_challenge(
+            interaction,
+            challenger=interaction.user,
+            challenged=jogador,
+            stake=quantia,
+        )
+
     @app_commands.command(name="estatisticas_tickets", description="Mostra quantos tickets ja foram abertos no servidor.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def estatisticas_tickets(self, interaction: discord.Interaction) -> None:
@@ -1540,6 +2190,7 @@ class ClanBot(commands.Bot):
         self.grade_panel_view = GradePanelView(self)
         self.grade_test_view = GradeTestTicketView(self)
         self.grade_challenge_view = GradeChallengeTicketView(self)
+        self.player_duel_view = PlayerDuelView(self)
         self.recent_messages: dict[tuple[int, int], deque[datetime]] = defaultdict(lambda: deque(maxlen=8))
         self.recent_joins: dict[int, deque[datetime]] = defaultdict(deque)
         self.recent_raid_alerts: dict[int, datetime] = {}
@@ -1554,6 +2205,7 @@ class ClanBot(commands.Bot):
         self.add_view(self.grade_panel_view)
         self.add_view(self.grade_test_view)
         self.add_view(self.grade_challenge_view)
+        self.add_view(self.player_duel_view)
         for panel in self.database.list_help_panels():
             self.add_view(HelpAvailabilityView(self), message_id=panel["message_id"])
             logger.info(
@@ -1621,6 +2273,10 @@ class ClanBot(commands.Bot):
         channel = guild.get_channel(channel_id) if channel_id else self.get_log_channel(guild)
         return channel if isinstance(channel, discord.TextChannel) else None
 
+    def get_apostle_balance(self, guild_id: int, user_id: int) -> int:
+        row = self.database.get_apostle_balance(guild_id, user_id)
+        return int(row["balance"]) if row else 0
+
     def get_feature_settings(self, guild_id: int) -> dict[str, Any]:
         stored = self.database.get_feature_settings(guild_id) or {}
         return {
@@ -1634,6 +2290,141 @@ class ClanBot(commands.Bot):
     def get_help_notify_role(self, guild: discord.Guild) -> discord.Role | None:
         role_id = self.get_feature_settings(guild.id)["help_notify_role_id"]
         return guild.get_role(role_id) if role_id else None
+
+    def build_apostle_balance_embed(
+        self,
+        *,
+        member: discord.Member,
+        balance: int,
+        color: discord.Color | int | None = None,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="Carteira de Pontos de Apostolo",
+            color=color or discord.Color.dark_red(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.description = "Sua reserva atual para apostas, desafios e futuros minigames."
+        embed.add_field(name="Jogador", value=f"{member.mention}\n`{member.id}`", inline=True)
+        embed.add_field(name="Saldo", value=f"`{format_points(balance)}` pontos", inline=True)
+        if member.display_avatar:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="God Hand | Economia base")
+        return embed
+
+    def get_apostle_shop_item(self, query: str) -> ApostleShopItem | None:
+        normalized = normalize_lookup_text(query)
+        for item in APOSTLE_SHOP_ITEMS:
+            if normalized in {
+                normalize_lookup_text(item.key),
+                normalize_lookup_text(item.name),
+            }:
+                return item
+        return None
+
+    def get_apostle_profile(self, guild_id: int, user_id: int, user_tag: str) -> dict[str, Any]:
+        profile = self.database.get_apostle_profile(guild_id, user_id)
+        if profile is None:
+            profile = self.database.upsert_apostle_profile(
+                guild_id=guild_id,
+                user_id=user_id,
+                user_tag=user_tag,
+            )
+        return profile
+
+    def build_apostle_profile_embed(self, member: discord.Member) -> discord.Embed:
+        balance = self.get_apostle_balance(member.guild.id, member.id)
+        profile = self.get_apostle_profile(member.guild.id, member.id, str(member))
+        totals = self.database.get_apostle_transaction_summary(member.guild.id, member.id)
+        inventory = self.database.list_apostle_inventory(member.guild.id, member.id)
+        recent_transactions = self.database.list_recent_apostle_transactions(member.guild.id, member.id, limit=5)
+
+        embed = discord.Embed(
+            title="Perfil de Apostolo",
+            color=discord.Color.dark_red(),
+            timestamp=discord.utils.utcnow(),
+        )
+        title_text = profile.get("selected_title") or "Sem titulo equipado"
+        badge_text = profile.get("selected_badge") or "Sem insignia equipada"
+        embed.description = f"**Titulo:** {title_text}\n**Insignia:** {badge_text}"
+        embed.add_field(name="Jogador", value=f"{member.mention}\n`{member.id}`", inline=True)
+        embed.add_field(name="Saldo", value=f"`{format_points(balance)}` pontos", inline=True)
+        embed.add_field(name="Streak diario", value=str(profile.get("daily_streak", 0)), inline=True)
+        embed.add_field(name="Total ganho", value=f"`{format_points(totals['earned'])}`", inline=True)
+        embed.add_field(name="Total gasto", value=f"`{format_points(totals['spent'])}`", inline=True)
+        embed.add_field(name="Itens no inventario", value=str(sum(int(item["quantity"]) for item in inventory)), inline=True)
+        embed.add_field(
+            name="Ultimo diario",
+            value=format_discord_timestamp(profile.get("last_daily_claim_at"), "R"),
+            inline=False,
+        )
+        if recent_transactions:
+            lines = []
+            for row in recent_transactions[:5]:
+                sign = "+" if row["amount"] > 0 else ""
+                lines.append(
+                    f"`{sign}{format_points(int(row['amount']))}` {row['transaction_type']} ({format_discord_timestamp(row['created_at'], 'R')})"
+                )
+            embed.add_field(name="Movimentacoes recentes", value="\n".join(lines), inline=False)
+        if member.display_avatar:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="God Hand | Economia e interacao")
+        return embed
+
+    def get_action_cooldown_remaining(self, guild_id: int, user_id: int, action_key: str) -> timedelta | None:
+        row = self.database.get_apostle_cooldown(guild_id, user_id, action_key)
+        if row is None:
+            return None
+
+        expires_at = parse_iso_datetime(row.get("expires_at"))
+        if expires_at is None:
+            return None
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        remaining = expires_at - discord.utils.utcnow()
+        return remaining if remaining.total_seconds() > 0 else None
+
+    def build_player_duel_embed(self, guild: discord.Guild, duel: dict[str, Any]) -> discord.Embed:
+        challenger = guild.get_member(duel["challenger_id"])
+        challenged = guild.get_member(duel["challenged_id"])
+        challenger_text = challenger.mention if challenger else duel["challenger_tag"]
+        challenged_text = challenged.mention if challenged else duel["challenged_tag"]
+
+        status_map = {
+            "pending": ("Desafio pendente", discord.Color.orange(), "Aguardando o desafiado aceitar ou recusar."),
+            "active": ("Desafio aceito", discord.Color.blurple(), "A luta pode acontecer. Os dois lados precisam confirmar o mesmo vencedor."),
+            "finished": ("Desafio finalizado", discord.Color.green(), "O vencedor foi confirmado pelos dois jogadores."),
+            "declined": ("Desafio recusado", discord.Color.red(), "O desafiado recusou o duelo."),
+            "disputed": ("Resultado contestado", discord.Color.dark_red(), "Os jogadores informaram resultados diferentes e o valor foi devolvido."),
+            "cancelled": ("Desafio cancelado", discord.Color.dark_grey(), "O desafio foi cancelado antes de ser concluido."),
+        }
+        title, color, description = status_map.get(
+            duel["status"],
+            ("Desafio entre jogadores", self.settings.embed_color, "Desafio registrado."),
+        )
+        embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
+        embed.description = description
+        embed.add_field(name="Desafiante", value=challenger_text, inline=True)
+        embed.add_field(name="Desafiado", value=challenged_text, inline=True)
+        embed.add_field(name="Aposta", value=f"`{format_points(int(duel['stake']))}` pontos", inline=True)
+        embed.add_field(name="Criado em", value=format_discord_timestamp(duel.get("created_at"), "f"), inline=True)
+        if duel.get("accepted_at"):
+            embed.add_field(name="Aceito em", value=format_discord_timestamp(duel.get("accepted_at"), "f"), inline=True)
+        if duel["status"] == "active":
+            challenger_vote = duel.get("challenger_vote_winner_id")
+            challenged_vote = duel.get("challenged_vote_winner_id")
+            embed.add_field(
+                name="Confirmacoes",
+                value=(
+                    f"Desafiante: {'ok' if challenger_vote else 'pendente'}\n"
+                    f"Desafiado: {'ok' if challenged_vote else 'pendente'}"
+                ),
+                inline=False,
+            )
+        if duel.get("winner_id"):
+            winner = guild.get_member(duel["winner_id"])
+            embed.add_field(name="Vencedor", value=winner.mention if winner else str(duel["winner_id"]), inline=False)
+        embed.set_footer(text="O bot so paga quando os dois confirmam o mesmo vencedor.")
+        return embed
 
     def build_grade_evaluation_embed(
         self,
@@ -3375,6 +4166,313 @@ class ClanBot(commands.Bot):
             closed_by_tag=str(member),
             status_label=ticket_status_label(ticket["status"]),
             announcement=f"Ticket fechado por {member.mention}.",
+        )
+
+    async def create_player_duel_challenge(
+        self,
+        interaction: discord.Interaction,
+        *,
+        challenger: discord.Member,
+        challenged: discord.Member,
+        stake: int,
+    ) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse comando so funciona em canal de texto do servidor.", ephemeral=True)
+            return
+
+        if challenged.bot:
+            await interaction.response.send_message("Nao da para desafiar bots.", ephemeral=True)
+            return
+        if challenged.id == challenger.id:
+            await interaction.response.send_message("Voce nao pode se desafiar.", ephemeral=True)
+            return
+        if stake <= 0:
+            await interaction.response.send_message("A quantia precisa ser maior que zero.", ephemeral=True)
+            return
+
+        challenger_balance = self.get_apostle_balance(guild.id, challenger.id)
+        challenged_balance = self.get_apostle_balance(guild.id, challenged.id)
+        if challenger_balance < stake:
+            await interaction.response.send_message(
+                f"Voce precisa ter pelo menos `{format_points(stake)}` Pontos de Apostolo para abrir esse desafio.",
+                ephemeral=True,
+            )
+            return
+        if challenged_balance < stake:
+            await interaction.response.send_message(
+                f"{challenged.mention} nao tem saldo suficiente para aceitar esse desafio agora.",
+                ephemeral=True,
+            )
+            return
+
+        duel_preview = {
+            "challenger_id": challenger.id,
+            "challenger_tag": str(challenger),
+            "challenged_id": challenged.id,
+            "challenged_tag": str(challenged),
+            "stake": stake,
+            "status": "pending",
+            "created_at": discord.utils.utcnow().isoformat(timespec="seconds"),
+            "accepted_at": None,
+            "challenger_vote_winner_id": None,
+            "challenged_vote_winner_id": None,
+            "winner_id": None,
+        }
+        embed = self.build_player_duel_embed(guild, duel_preview)
+        embed.add_field(
+            name="Regras rapidas",
+            value=(
+                "1. O desafiado precisa aceitar.\n"
+                "2. Ao aceitar, o valor dos dois lados fica travado.\n"
+                "3. Depois da luta, os dois precisam confirmar o mesmo vencedor."
+            ),
+            inline=False,
+        )
+
+        await interaction.response.send_message(
+            content=f"{challenger.mention} desafiou {challenged.mention} valendo `{format_points(stake)}` Pontos de Apostolo.",
+            embed=embed,
+            view=self.player_duel_view,
+        )
+        message = await interaction.original_response()
+        self.database.create_player_duel(
+            guild_id=guild.id,
+            channel_id=channel.id,
+            message_id=message.id,
+            challenger_id=challenger.id,
+            challenger_tag=str(challenger),
+            challenged_id=challenged.id,
+            challenged_tag=str(challenged),
+            stake=stake,
+        )
+
+    async def accept_player_duel_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        message = interaction.message
+        if guild is None or not isinstance(channel, discord.TextChannel) or message is None:
+            await interaction.response.send_message("Esse botao so funciona no servidor.", ephemeral=True)
+            return
+
+        duel = self.database.get_player_duel_by_message(message.id)
+        if duel is None:
+            await interaction.response.send_message("Nao encontrei esse desafio.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or member.id != duel["challenged_id"]:
+            await interaction.response.send_message("So o jogador desafiado pode aceitar.", ephemeral=True)
+            return
+        if duel["status"] != "pending":
+            await interaction.response.send_message("Esse desafio nao esta mais pendente.", ephemeral=True)
+            return
+
+        challenger_balance = self.get_apostle_balance(guild.id, duel["challenger_id"])
+        challenged_balance = self.get_apostle_balance(guild.id, duel["challenged_id"])
+        stake = int(duel["stake"])
+        if challenger_balance < stake or challenged_balance < stake:
+            self.database.update_player_duel_status(message.id, status="cancelled", finished=True)
+            updated_duel = self.database.get_player_duel_by_message(message.id) or duel
+            await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
+            await interaction.response.send_message(
+                "Um dos lados nao tem mais saldo suficiente. O desafio foi cancelado.",
+                ephemeral=True,
+            )
+            return
+
+        challenger_new_balance = self.database.adjust_apostle_balance(
+            guild.id,
+            duel["challenger_id"],
+            duel["challenger_tag"],
+            -stake,
+        )
+        if challenger_new_balance is None:
+            await interaction.response.send_message("O desafiante nao tem mais saldo suficiente.", ephemeral=True)
+            return
+
+        challenged_new_balance = self.database.adjust_apostle_balance(
+            guild.id,
+            duel["challenged_id"],
+            duel["challenged_tag"],
+            -stake,
+        )
+        if challenged_new_balance is None:
+            self.database.adjust_apostle_balance(guild.id, duel["challenger_id"], duel["challenger_tag"], stake)
+            await interaction.response.send_message("Voce nao tem mais saldo suficiente para aceitar.", ephemeral=True)
+            return
+
+        self.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=duel["challenger_id"],
+            user_tag=duel["challenger_tag"],
+            amount=-stake,
+            transaction_type="duel_lock",
+            details="Entrada em duelo pvp",
+            counterparty_id=duel["challenged_id"],
+            counterparty_tag=duel["challenged_tag"],
+            balance_after=challenger_new_balance,
+        )
+        self.database.log_apostle_transaction(
+            guild_id=guild.id,
+            user_id=duel["challenged_id"],
+            user_tag=duel["challenged_tag"],
+            amount=-stake,
+            transaction_type="duel_lock",
+            details="Entrada em duelo pvp",
+            counterparty_id=duel["challenger_id"],
+            counterparty_tag=duel["challenger_tag"],
+            balance_after=challenged_new_balance,
+        )
+        self.database.update_player_duel_status(message.id, status="active", accepted=True)
+        updated_duel = self.database.get_player_duel_by_message(message.id) or duel
+        await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
+        await interaction.response.send_message(
+            f"Desafio aceito. `{format_points(stake)}` pontos de cada lado foram travados. Depois da luta, confirmem o vencedor nos botoes.",
+            ephemeral=True,
+        )
+
+    async def decline_player_duel_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        message = interaction.message
+        if guild is None or message is None:
+            await interaction.response.send_message("Esse botao so funciona no servidor.", ephemeral=True)
+            return
+
+        duel = self.database.get_player_duel_by_message(message.id)
+        if duel is None:
+            await interaction.response.send_message("Nao encontrei esse desafio.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or member.id != duel["challenged_id"]:
+            await interaction.response.send_message("So o jogador desafiado pode recusar.", ephemeral=True)
+            return
+        if duel["status"] != "pending":
+            await interaction.response.send_message("Esse desafio nao esta mais pendente.", ephemeral=True)
+            return
+
+        self.database.update_player_duel_status(message.id, status="declined", finished=True)
+        updated_duel = self.database.get_player_duel_by_message(message.id) or duel
+        await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
+        await interaction.response.send_message("Desafio recusado.", ephemeral=True)
+
+    async def vote_player_duel_from_interaction(self, interaction: discord.Interaction, *, winner_side: str) -> None:
+        guild = interaction.guild
+        message = interaction.message
+        if guild is None or message is None:
+            await interaction.response.send_message("Esse botao so funciona no servidor.", ephemeral=True)
+            return
+
+        duel = self.database.get_player_duel_by_message(message.id)
+        if duel is None:
+            await interaction.response.send_message("Nao encontrei esse desafio.", ephemeral=True)
+            return
+        if duel["status"] != "active":
+            await interaction.response.send_message("Esse desafio nao esta ativo para confirmar resultado.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or member.id not in {duel["challenger_id"], duel["challenged_id"]}:
+            await interaction.response.send_message("So os dois jogadores podem confirmar o resultado.", ephemeral=True)
+            return
+
+        existing_vote = duel["challenger_vote_winner_id"] if member.id == duel["challenger_id"] else duel["challenged_vote_winner_id"]
+        if existing_vote:
+            await interaction.response.send_message("Voce ja confirmou um resultado nesse duelo.", ephemeral=True)
+            return
+
+        winner_id = duel["challenger_id"] if winner_side == "challenger" else duel["challenged_id"]
+        self.database.record_player_duel_vote(message.id, voter_id=member.id, winner_id=winner_id)
+        updated_duel = self.database.get_player_duel_by_message(message.id) or duel
+
+        challenger_vote = updated_duel.get("challenger_vote_winner_id")
+        challenged_vote = updated_duel.get("challenged_vote_winner_id")
+        stake = int(updated_duel["stake"])
+
+        if challenger_vote and challenged_vote:
+            if challenger_vote == challenged_vote:
+                final_winner_id = int(challenger_vote)
+                loser_id = updated_duel["challenged_id"] if final_winner_id == updated_duel["challenger_id"] else updated_duel["challenger_id"]
+                winner_member = guild.get_member(final_winner_id)
+                loser_member = guild.get_member(loser_id)
+                winner_tag = str(winner_member) if winner_member else (updated_duel["challenger_tag"] if final_winner_id == updated_duel["challenger_id"] else updated_duel["challenged_tag"])
+                loser_tag = str(loser_member) if loser_member else (updated_duel["challenger_tag"] if loser_id == updated_duel["challenger_id"] else updated_duel["challenged_tag"])
+
+                winner_balance = self.database.adjust_apostle_balance(guild.id, final_winner_id, winner_tag, stake * 2)
+                self.database.log_apostle_transaction(
+                    guild_id=guild.id,
+                    user_id=final_winner_id,
+                    user_tag=winner_tag,
+                    amount=stake * 2,
+                    transaction_type="duel_win",
+                    details="Vitoria em duelo pvp",
+                    counterparty_id=loser_id,
+                    counterparty_tag=loser_tag,
+                    balance_after=winner_balance,
+                )
+                self.database.update_player_duel_status(
+                    message.id,
+                    status="finished",
+                    winner_id=final_winner_id,
+                    finished=True,
+                )
+                finished_duel = self.database.get_player_duel_by_message(message.id) or updated_duel
+                await message.edit(embed=self.build_player_duel_embed(guild, finished_duel), view=self.player_duel_view)
+                await interaction.response.send_message(
+                    f"Resultado confirmado. {winner_member.mention if winner_member else winner_tag} recebeu `{format_points(stake * 2)}` pontos.",
+                    ephemeral=True,
+                )
+                return
+
+            challenger_balance = self.database.adjust_apostle_balance(
+                guild.id,
+                updated_duel["challenger_id"],
+                updated_duel["challenger_tag"],
+                stake,
+            )
+            challenged_balance = self.database.adjust_apostle_balance(
+                guild.id,
+                updated_duel["challenged_id"],
+                updated_duel["challenged_tag"],
+                stake,
+            )
+            self.database.log_apostle_transaction(
+                guild_id=guild.id,
+                user_id=updated_duel["challenger_id"],
+                user_tag=updated_duel["challenger_tag"],
+                amount=stake,
+                transaction_type="duel_refund",
+                details="Resultado contestado em duelo pvp",
+                counterparty_id=updated_duel["challenged_id"],
+                counterparty_tag=updated_duel["challenged_tag"],
+                balance_after=challenger_balance,
+            )
+            self.database.log_apostle_transaction(
+                guild_id=guild.id,
+                user_id=updated_duel["challenged_id"],
+                user_tag=updated_duel["challenged_tag"],
+                amount=stake,
+                transaction_type="duel_refund",
+                details="Resultado contestado em duelo pvp",
+                counterparty_id=updated_duel["challenger_id"],
+                counterparty_tag=updated_duel["challenger_tag"],
+                balance_after=challenged_balance,
+            )
+            self.database.update_player_duel_status(message.id, status="disputed", finished=True)
+            disputed_duel = self.database.get_player_duel_by_message(message.id) or updated_duel
+            await message.edit(embed=self.build_player_duel_embed(guild, disputed_duel), view=self.player_duel_view)
+            await interaction.response.send_message(
+                "Os dois lados marcaram vencedores diferentes. O duelo foi contestado e os pontos foram devolvidos.",
+                ephemeral=True,
+            )
+            return
+
+        await message.edit(embed=self.build_player_duel_embed(guild, updated_duel), view=self.player_duel_view)
+        await interaction.response.send_message(
+            "Sua confirmacao foi registrada. Agora falta o outro jogador confirmar o mesmo vencedor.",
+            ephemeral=True,
         )
 
     async def ensure_help_roles(self, guild: discord.Guild) -> tuple[discord.Role, discord.Role]:

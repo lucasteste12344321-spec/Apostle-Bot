@@ -364,6 +364,85 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_grade_challenges_member
             ON grade_challenges (guild_id, challenger_id, challenged_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS apostle_balances (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_tag TEXT NOT NULL,
+                balance INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS apostle_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_tag TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                transaction_type TEXT NOT NULL,
+                details TEXT,
+                counterparty_id INTEGER,
+                counterparty_tag TEXT,
+                balance_after INTEGER,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_apostle_transactions_user
+            ON apostle_transactions (guild_id, user_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS apostle_profiles (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_tag TEXT NOT NULL,
+                daily_streak INTEGER NOT NULL DEFAULT 0,
+                last_daily_claim_at TEXT,
+                selected_title TEXT,
+                selected_badge TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS apostle_inventory (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                item_key TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id, item_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS apostle_cooldowns (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                action_key TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id, action_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS player_duels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL UNIQUE,
+                challenger_id INTEGER NOT NULL,
+                challenger_tag TEXT NOT NULL,
+                challenged_id INTEGER NOT NULL,
+                challenged_tag TEXT NOT NULL,
+                stake INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                challenger_vote_winner_id INTEGER,
+                challenged_vote_winner_id INTEGER,
+                winner_id INTEGER,
+                created_at TEXT NOT NULL,
+                accepted_at TEXT,
+                finished_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_player_duels_guild
+            ON player_duels (guild_id, created_at);
             """
         )
         self._ensure_column("guild_settings", "evaluation_channel_id", "INTEGER")
@@ -1075,6 +1154,380 @@ class Database:
             (ticket_type,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_apostle_balance(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM apostle_balances WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def set_apostle_balance(self, guild_id: int, user_id: int, user_tag: str, balance: int) -> int:
+        normalized_balance = max(0, balance)
+        self.connection.execute(
+            """
+            INSERT INTO apostle_balances (
+                guild_id,
+                user_id,
+                user_tag,
+                balance,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                user_tag = excluded.user_tag,
+                balance = excluded.balance,
+                updated_at = excluded.updated_at
+            """,
+            (guild_id, user_id, user_tag, normalized_balance, utcnow_iso()),
+        )
+        self.connection.commit()
+        return normalized_balance
+
+    def adjust_apostle_balance(self, guild_id: int, user_id: int, user_tag: str, delta: int) -> int | None:
+        current = self.get_apostle_balance(guild_id, user_id)
+        current_balance = current["balance"] if current else 0
+        new_balance = current_balance + delta
+        if new_balance < 0:
+            return None
+        return self.set_apostle_balance(guild_id, user_id, user_tag, new_balance)
+
+    def log_apostle_transaction(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        amount: int,
+        transaction_type: str,
+        details: str | None = None,
+        counterparty_id: int | None = None,
+        counterparty_tag: str | None = None,
+        balance_after: int | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO apostle_transactions (
+                guild_id,
+                user_id,
+                user_tag,
+                amount,
+                transaction_type,
+                details,
+                counterparty_id,
+                counterparty_tag,
+                balance_after,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                user_id,
+                user_tag,
+                amount,
+                transaction_type,
+                details,
+                counterparty_id,
+                counterparty_tag,
+                balance_after,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+
+    def list_top_apostle_balances(self, guild_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM apostle_balances
+            WHERE guild_id = ?
+            ORDER BY balance DESC, user_tag ASC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_apostle_profile(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM apostle_profiles WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_apostle_profile(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        daily_streak: int | None = None,
+        last_daily_claim_at: str | None = None,
+        selected_title: str | None = None,
+        selected_badge: str | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_apostle_profile(guild_id, user_id) or {
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "user_tag": user_tag,
+            "daily_streak": 0,
+            "last_daily_claim_at": None,
+            "selected_title": None,
+            "selected_badge": None,
+            "updated_at": utcnow_iso(),
+        }
+        current["user_tag"] = user_tag
+        if daily_streak is not None:
+            current["daily_streak"] = daily_streak
+        if last_daily_claim_at is not None:
+            current["last_daily_claim_at"] = last_daily_claim_at
+        if selected_title is not None:
+            current["selected_title"] = selected_title
+        if selected_badge is not None:
+            current["selected_badge"] = selected_badge
+        current["updated_at"] = utcnow_iso()
+
+        self.connection.execute(
+            """
+            INSERT INTO apostle_profiles (
+                guild_id,
+                user_id,
+                user_tag,
+                daily_streak,
+                last_daily_claim_at,
+                selected_title,
+                selected_badge,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                user_tag = excluded.user_tag,
+                daily_streak = excluded.daily_streak,
+                last_daily_claim_at = excluded.last_daily_claim_at,
+                selected_title = excluded.selected_title,
+                selected_badge = excluded.selected_badge,
+                updated_at = excluded.updated_at
+            """,
+            (
+                current["guild_id"],
+                current["user_id"],
+                current["user_tag"],
+                current["daily_streak"],
+                current["last_daily_claim_at"],
+                current["selected_title"],
+                current["selected_badge"],
+                current["updated_at"],
+            ),
+        )
+        self.connection.commit()
+        return current
+
+    def get_apostle_cooldown(self, guild_id: int, user_id: int, action_key: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM apostle_cooldowns
+            WHERE guild_id = ? AND user_id = ? AND action_key = ?
+            """,
+            (guild_id, user_id, action_key),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def set_apostle_cooldown(self, guild_id: int, user_id: int, action_key: str, expires_at: str) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO apostle_cooldowns (
+                guild_id,
+                user_id,
+                action_key,
+                expires_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, action_key) DO UPDATE SET
+                expires_at = excluded.expires_at,
+                updated_at = excluded.updated_at
+            """,
+            (guild_id, user_id, action_key, expires_at, utcnow_iso()),
+        )
+        self.connection.commit()
+
+    def list_apostle_inventory(self, guild_id: int, user_id: int) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM apostle_inventory
+            WHERE guild_id = ? AND user_id = ? AND quantity > 0
+            ORDER BY item_name ASC
+            """,
+            (guild_id, user_id),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_apostle_inventory_item(self, guild_id: int, user_id: int, item_key: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM apostle_inventory
+            WHERE guild_id = ? AND user_id = ? AND item_key = ?
+            """,
+            (guild_id, user_id, item_key),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def add_apostle_item(self, guild_id: int, user_id: int, item_key: str, item_name: str, quantity: int = 1) -> int:
+        current = self.get_apostle_inventory_item(guild_id, user_id, item_key)
+        current_quantity = current["quantity"] if current else 0
+        new_quantity = current_quantity + quantity
+        self.connection.execute(
+            """
+            INSERT INTO apostle_inventory (
+                guild_id,
+                user_id,
+                item_key,
+                item_name,
+                quantity,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, item_key) DO UPDATE SET
+                item_name = excluded.item_name,
+                quantity = excluded.quantity,
+                updated_at = excluded.updated_at
+            """,
+            (guild_id, user_id, item_key, item_name, new_quantity, utcnow_iso()),
+        )
+        self.connection.commit()
+        return new_quantity
+
+    def remove_apostle_item(self, guild_id: int, user_id: int, item_key: str, quantity: int = 1) -> int | None:
+        current = self.get_apostle_inventory_item(guild_id, user_id, item_key)
+        if current is None or current["quantity"] < quantity:
+            return None
+        new_quantity = current["quantity"] - quantity
+        self.connection.execute(
+            """
+            UPDATE apostle_inventory
+            SET quantity = ?, updated_at = ?
+            WHERE guild_id = ? AND user_id = ? AND item_key = ?
+            """,
+            (new_quantity, utcnow_iso(), guild_id, user_id, item_key),
+        )
+        self.connection.commit()
+        return new_quantity
+
+    def get_apostle_transaction_summary(self, guild_id: int, user_id: int) -> dict[str, int]:
+        earned = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0)
+            FROM apostle_transactions
+            WHERE guild_id = ? AND user_id = ? AND amount > 0
+            """,
+            (guild_id, user_id),
+        ).fetchone()[0]
+        spent = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(ABS(amount)), 0)
+            FROM apostle_transactions
+            WHERE guild_id = ? AND user_id = ? AND amount < 0
+            """,
+            (guild_id, user_id),
+        ).fetchone()[0]
+        return {"earned": int(earned or 0), "spent": int(spent or 0)}
+
+    def list_recent_apostle_transactions(self, guild_id: int, user_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM apostle_transactions
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_player_duel(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        challenger_id: int,
+        challenger_tag: str,
+        challenged_id: int,
+        challenged_tag: str,
+        stake: int,
+    ) -> int:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO player_duels (
+                guild_id,
+                channel_id,
+                message_id,
+                challenger_id,
+                challenger_tag,
+                challenged_id,
+                challenged_tag,
+                stake,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                channel_id,
+                message_id,
+                challenger_id,
+                challenger_tag,
+                challenged_id,
+                challenged_tag,
+                stake,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def get_player_duel_by_message(self, message_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM player_duels WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_player_duel_status(
+        self,
+        message_id: int,
+        *,
+        status: str,
+        winner_id: int | None = None,
+        accepted: bool = False,
+        finished: bool = False,
+    ) -> None:
+        accepted_at = utcnow_iso() if accepted else None
+        finished_at = utcnow_iso() if finished else None
+        self.connection.execute(
+            """
+            UPDATE player_duels
+            SET status = ?,
+                winner_id = COALESCE(?, winner_id),
+                accepted_at = COALESCE(?, accepted_at),
+                finished_at = COALESCE(?, finished_at)
+            WHERE message_id = ?
+            """,
+            (status, winner_id, accepted_at, finished_at, message_id),
+        )
+        self.connection.commit()
+
+    def record_player_duel_vote(self, message_id: int, *, voter_id: int, winner_id: int) -> None:
+        duel = self.get_player_duel_by_message(message_id)
+        if duel is None:
+            return
+
+        if voter_id == duel["challenger_id"]:
+            self.connection.execute(
+                "UPDATE player_duels SET challenger_vote_winner_id = ? WHERE message_id = ?",
+                (winner_id, message_id),
+            )
+        elif voter_id == duel["challenged_id"]:
+            self.connection.execute(
+                "UPDATE player_duels SET challenged_vote_winner_id = ? WHERE message_id = ?",
+                (winner_id, message_id),
+            )
+        self.connection.commit()
 
     def list_ticket_events(self, channel_id: int, *, limit: int = 25) -> list[dict[str, Any]]:
         rows = self.connection.execute(
