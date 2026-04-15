@@ -184,6 +184,10 @@ def format_points(value: int) -> str:
     return f"{value:,}".replace(",", ".")
 
 
+def participation_category_label(category: str) -> str:
+    return PARTICIPATION_CATEGORY_DEFINITIONS.get(category, {}).get("label", category.replace("_", " ").title())
+
+
 APOSTLE_DAILY_BASE = 150
 APOSTLE_DAILY_STREAK_STEP = 25
 APOSTLE_DAILY_STREAK_MAX_BONUS = 250
@@ -191,6 +195,60 @@ APOSTLE_PAY_MINIMUM = 25
 APOSTLE_WORK_COOLDOWN = timedelta(hours=2)
 APOSTLE_HUNT_COOLDOWN = timedelta(hours=1)
 APOSTLE_DAILY_COOLDOWN = timedelta(days=1)
+
+PARTICIPATION_DISABLED_MESSAGE = (
+    "Os Pontos de Apostolo agora contam participacao para o torneio mensal. "
+    "Esse comando antigo de economia foi desativado para ninguem farmar vaga do torneio por minigame."
+)
+
+PARTICIPATION_CATEGORY_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "ajuda_time": {
+        "label": "Ajuda em time",
+        "default_points": 6,
+        "description": "Quando a pessoa ajuda outra dentro do time.",
+    },
+    "avaliacao": {
+        "label": "Avaliacao de grade",
+        "default_points": 10,
+        "description": "Quando um avaliador conclui um teste de grade.",
+    },
+    "arbitragem": {
+        "label": "Arbitragem",
+        "default_points": 8,
+        "description": "Quando um arbitro fecha ou resolve um desafio de grade.",
+    },
+    "atividade": {
+        "label": "Ajuda em atividade",
+        "default_points": 12,
+        "description": "Participacao em eventos, torneios internos e atividades do server.",
+    },
+    "manutencao": {
+        "label": "Manutencao do server",
+        "default_points": 10,
+        "description": "Ajuda a manter o servidor, organizacao e staff work.",
+    },
+    "boost": {
+        "label": "Boost do servidor",
+        "default_points": 15,
+        "description": "Quando alguem boosta o servidor.",
+    },
+    "bonus": {
+        "label": "Bonus especial",
+        "default_points": 5,
+        "description": "Ajuste livre para campanhas ou decisoes da staff.",
+    },
+    "torneio_reset": {
+        "label": "Reset de temporada",
+        "default_points": 0,
+        "description": "Fechamento do torneio e reset da pontuacao sazonal.",
+    },
+}
+
+PARTICIPATION_CATEGORY_CHOICES = [
+    app_commands.Choice(name=f"{value['label']} ({value['default_points']} pts)", value=key)
+    for key, value in PARTICIPATION_CATEGORY_DEFINITIONS.items()
+    if key != "torneio_reset"
+]
 
 APOSTLE_PROGRESSION_TITLES: tuple[ApostleProgressionTitle, ...] = (
     ApostleProgressionTitle(
@@ -651,6 +709,13 @@ class ClanCog(commands.Cog):
                 )
                 await self.bot.emit_watch_alert(after.guild, after.id, watch_embed)
 
+        if before.premium_since != after.premium_since and after.premium_since is not None and not after.bot:
+            await self.bot.award_participation_points(
+                after,
+                category="boost",
+                reason="Boostou o servidor e ajudou a manter a comunidade.",
+            )
+
     @commands.Cog.listener()
     async def on_member_ban(self, guild: discord.Guild, user: discord.User) -> None:
         embed = self.build_embed("Membro banido", color=discord.Color.red())
@@ -822,7 +887,7 @@ class ClanCog(commands.Cog):
 
     @app_commands.command(
         name="configurar_titulos_apostolo",
-        description="Vincula cargos aos titulos progressivos de Pontos de Apostolo.",
+        description="Vincula cargos aos marcos sazonais de participacao.",
     )
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(
@@ -848,7 +913,7 @@ class ClanCog(commands.Cog):
             }
             embed = self.build_embed("Titulos progressivos de Apostolo", color=discord.Color.dark_gold())
             embed.description = (
-                "Configure aqui quais cargos automaticos vao acompanhar cada marco de Pontos de Apostolo.\n"
+                "Configure aqui quais cargos automaticos vao acompanhar cada marco sazonal de participacao.\n"
                 "Use o mesmo comando com `titulo` e `cargo` para salvar, ou deixe `cargo` vazio para remover."
             )
             for title_info in APOSTLE_PROGRESSION_TITLES:
@@ -879,7 +944,7 @@ class ClanCog(commands.Cog):
             self.bot.database.upsert_apostle_title_role(guild.id, title_info.key, cargo.id)
             action_text = (
                 f"O titulo **{title_info.name}** agora aplica o cargo {cargo.mention} quando o membro alcanca "
-                f"`{format_points(title_info.required_points)}` pontos acumulados."
+                f"`{format_points(title_info.required_points)}` pontos na temporada."
             )
 
         synced_members = 0
@@ -891,7 +956,7 @@ class ClanCog(commands.Cog):
             synced_members += 1
 
         await interaction.followup.send(
-            f"{action_text}\nSincronizacao concluida em `{synced_members}` perfil(is) da economia.",
+            f"{action_text}\nSincronizacao concluida em `{synced_members}` perfil(is) da temporada.",
             ephemeral=True,
         )
 
@@ -1874,7 +1939,163 @@ class ClanCog(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="saldo", description="Mostra seu saldo de Pontos de Apostolo.")
+    @app_commands.command(name="configurar_torneio_pontos", description="Define o minimo de pontos para participar do torneio.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def configurar_torneio_pontos(self, interaction: discord.Interaction, pontos_minimos: int) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+        if pontos_minimos < 0:
+            await interaction.response.send_message("O minimo nao pode ser negativo.", ephemeral=True)
+            return
+
+        self.bot.database.upsert_feature_settings(interaction.guild.id, tournament_min_points=pontos_minimos)
+        embed = self.build_embed("Minimo do torneio atualizado", color=discord.Color.dark_gold())
+        embed.description = (
+            f"Agora o torneio mensal exige pelo menos `{format_points(pontos_minimos)}` pontos de participacao.\n\n"
+            "Pontuacoes automaticas atuais:\n"
+            + "\n".join(
+                f"- **{value['label']}:** {value['default_points']} ponto(s)"
+                for key, value in PARTICIPATION_CATEGORY_DEFINITIONS.items()
+                if key in {"avaliacao", "arbitragem", "boost"}
+            )
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="pontuar_participacao", description="Entrega pontos de participacao a um membro.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(
+        usuario="Membro que vai receber os pontos.",
+        categoria="Tipo de ajuda/participacao registrada.",
+        pontos="Se quiser, sobrescreva a pontuacao padrao da categoria.",
+        motivo="Explique rapidamente o que a pessoa fez para ganhar os pontos.",
+    )
+    @app_commands.choices(categoria=PARTICIPATION_CATEGORY_CHOICES)
+    async def pontuar_participacao(
+        self,
+        interaction: discord.Interaction,
+        usuario: discord.Member,
+        categoria: str,
+        motivo: str,
+        pontos: int | None = None,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+        if usuario.bot:
+            await interaction.response.send_message("Nao faz sentido pontuar bots nesse sistema.", ephemeral=True)
+            return
+        if pontos is not None and pontos <= 0:
+            await interaction.response.send_message("Se for informar pontos manualmente, use um numero maior que zero.", ephemeral=True)
+            return
+
+        base_points = pontos if pontos is not None else int(PARTICIPATION_CATEGORY_DEFINITIONS[categoria]["default_points"])
+        await interaction.response.defer(ephemeral=True)
+        new_balance = await self.bot.award_participation_points(
+            usuario,
+            category=categoria,
+            reason=motivo,
+            amount=base_points,
+            actor=interaction.user,
+        )
+        await interaction.followup.send(
+            f"{usuario.mention} recebeu `{format_points(base_points)}` ponto(s) em **{participation_category_label(categoria)}**. "
+            f"Saldo atual: `{format_points(new_balance)}`.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="elegibilidade_torneio", description="Mostra se um membro ja bateu a pontuacao minima do torneio.")
+    async def elegibilidade_torneio(self, interaction: discord.Interaction, usuario: discord.Member | None = None) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        member = usuario or interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("Nao consegui identificar o membro.", ephemeral=True)
+            return
+
+        balance = self.bot.get_apostle_balance(guild.id, member.id)
+        minimum = self.bot.get_tournament_min_points(guild.id)
+        remaining = max(0, minimum - balance)
+        eligible = balance >= minimum if minimum > 0 else True
+        season_start = self.bot.get_current_participation_season_start(guild.id)
+        breakdown = self.bot.database.get_apostle_transaction_breakdown(guild.id, member.id, since=season_start, limit=5)
+
+        embed = self.build_embed("Elegibilidade para o torneio", color=discord.Color.dark_gold())
+        embed.add_field(name="Membro", value=f"{member.mention}\n`{member.id}`", inline=True)
+        embed.add_field(name="Pontos atuais", value=f"`{format_points(balance)}`", inline=True)
+        embed.add_field(name="Minimo", value=f"`{format_points(minimum)}`", inline=True)
+        embed.add_field(name="Pode entrar?", value="Sim" if eligible else "Ainda nao", inline=True)
+        embed.add_field(name="Faltam", value=f"`{format_points(remaining)}`" if not eligible else "`0`", inline=True)
+        embed.add_field(
+            name="Temporada atual",
+            value=format_discord_timestamp(season_start, "f") if season_start else "Desde o inicio do sistema",
+            inline=True,
+        )
+        if breakdown:
+            lines = [
+                f"- **{participation_category_label(row['transaction_type'])}:** `{format_points(int(row['total_points']))}`"
+                for row in breakdown
+                if int(row["total_points"]) > 0
+            ]
+            if lines:
+                embed.add_field(name="De onde vieram os pontos", value="\n".join(lines), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="resetar_pontos_torneio", description="Reseta a temporada de participacao quando o torneio acabar.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def resetar_pontos_torneio(self, interaction: discord.Interaction, confirmacao: str) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+        if confirmacao.strip().upper() != "RESETAR":
+            await interaction.response.send_message(
+                "Para evitar acidente, confirme digitando exatamente `RESETAR`.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        existing_balances = self.bot.database.reset_apostle_balances(guild.id)
+        affected = 0
+        total_reset = 0
+        for row in existing_balances:
+            previous_balance = int(row["balance"])
+            if previous_balance == 0:
+                continue
+            affected += 1
+            total_reset += previous_balance
+            self.bot.database.log_apostle_transaction(
+                guild_id=guild.id,
+                user_id=int(row["user_id"]),
+                user_tag=row["user_tag"],
+                amount=-previous_balance,
+                transaction_type="tournament_reset",
+                details=f"Reset da temporada por {interaction.user}",
+                balance_after=0,
+            )
+
+        synced = 0
+        for user_id in self.bot.database.list_apostle_user_ids(guild.id):
+            member = guild.get_member(user_id)
+            if member is None or member.bot:
+                continue
+            await self.bot.sync_apostle_progression_role(member)
+            synced += 1
+
+        embed = self.build_embed("Temporada resetada", color=discord.Color.red())
+        embed.description = (
+            f"Os pontos de participacao foram zerados para o proximo torneio.\n\n"
+            f"**Perfis afetados:** `{affected}`\n"
+            f"**Total zerado:** `{format_points(total_reset)}`\n"
+            f"**Perfis sincronizados:** `{synced}`"
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="saldo", description="Mostra sua pontuacao atual de participacao para o torneio.")
     async def saldo(self, interaction: discord.Interaction, usuario: discord.Member | None = None) -> None:
         guild = interaction.guild
         if guild is None:
@@ -1890,7 +2111,7 @@ class ClanCog(commands.Cog):
         embed = self.bot.build_apostle_balance_embed(member=target, balance=balance)
         await interaction.response.send_message(embed=embed, ephemeral=usuario is None)
 
-    @app_commands.command(name="perfil_apostolo", description="Mostra seu perfil de Pontos de Apostolo.")
+    @app_commands.command(name="perfil_apostolo", description="Mostra seu perfil de participacao e pontuacao sazonal.")
     async def perfil_apostolo(self, interaction: discord.Interaction, usuario: discord.Member | None = None) -> None:
         guild = interaction.guild
         if guild is None:
@@ -1905,8 +2126,10 @@ class ClanCog(commands.Cog):
         embed = self.bot.build_apostle_profile_embed(target)
         await interaction.response.send_message(embed=embed, ephemeral=usuario is None)
 
-    @app_commands.command(name="diario", description="Resgata seus Pontos de Apostolo diarios.")
+    @app_commands.command(name="diario", description="Comando antigo desativado.")
     async def diario(self, interaction: discord.Interaction) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         guild = interaction.guild
         if guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
@@ -1968,8 +2191,10 @@ class ClanCog(commands.Cog):
         embed.add_field(name="Novo saldo", value=f"`{format_points(new_balance or 0)}`", inline=True)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="pagar", description="Transfere Pontos de Apostolo para outro jogador.")
+    @app_commands.command(name="pagar", description="Comando antigo desativado.")
     async def pagar(self, interaction: discord.Interaction, usuario: discord.Member, quantia: int) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         guild = interaction.guild
         if guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
@@ -2027,8 +2252,10 @@ class ClanCog(commands.Cog):
         embed.add_field(name="Seu saldo agora", value=f"`{format_points(sender_balance or 0)}`", inline=False)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="trabalhar", description="Cumpre um contrato e ganha Pontos de Apostolo.")
+    @app_commands.command(name="trabalhar", description="Comando antigo desativado.")
     async def trabalhar(self, interaction: discord.Interaction) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         guild = interaction.guild
         if guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
@@ -2074,8 +2301,10 @@ class ClanCog(commands.Cog):
             f"{flavor}\nVoce ganhou `{format_points(reward)}` Pontos de Apostolo.",
         )
 
-    @app_commands.command(name="cacada", description="Parte para uma cacada por Pontos de Apostolo.")
+    @app_commands.command(name="cacada", description="Comando antigo desativado.")
     async def cacada(self, interaction: discord.Interaction) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         guild = interaction.guild
         if guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
@@ -2149,8 +2378,10 @@ class ClanCog(commands.Cog):
             f"{text}\nVoce {verb} `{format_points(abs(reward))}` Pontos de Apostolo.",
         )
 
-    @app_commands.command(name="ritual", description="Aposta Pontos de Apostolo em um ritual arriscado.")
+    @app_commands.command(name="ritual", description="Comando antigo desativado.")
     async def ritual(self, interaction: discord.Interaction, quantia: int) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         guild = interaction.guild
         if guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
@@ -2195,8 +2426,10 @@ class ClanCog(commands.Cog):
             f"{text}\nVoce {verb} `{format_points(abs(delta))}` Pontos de Apostolo.",
         )
 
-    @app_commands.command(name="cara_ou_coroa", description="Joga cara ou coroa com ou sem aposta.")
+    @app_commands.command(name="cara_ou_coroa", description="Comando antigo desativado.")
     async def cara_ou_coroa(self, interaction: discord.Interaction, escolha: str, aposta: int | None = None) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         guild = interaction.guild
         if guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
@@ -2237,8 +2470,10 @@ class ClanCog(commands.Cog):
             f"A moeda caiu em **{result}**. Voce {verb} `{format_points(abs(delta))}` Pontos de Apostolo.",
         )
 
-    @app_commands.command(name="dado", description="Aposte em um numero de 1 a 6.")
+    @app_commands.command(name="dado", description="Comando antigo desativado.")
     async def dado(self, interaction: discord.Interaction, numero: int, aposta: int | None = None) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         guild = interaction.guild
         if guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
@@ -2278,8 +2513,10 @@ class ClanCog(commands.Cog):
             f"O dado caiu em **{result}**. Voce {verb} `{format_points(abs(delta))}` Pontos de Apostolo.",
         )
 
-    @app_commands.command(name="loja", description="Mostra a loja de Pontos de Apostolo.")
+    @app_commands.command(name="loja", description="Comando antigo desativado.")
     async def loja(self, interaction: discord.Interaction) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         embed = self.build_embed("Loja da God Hand", color=discord.Color.dark_purple())
         embed.description = "Use `/comprar item:<nome ou chave>` para adquirir um item."
         for item in APOSTLE_SHOP_ITEMS:
@@ -2290,8 +2527,10 @@ class ClanCog(commands.Cog):
             )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="comprar", description="Compra um item da loja da God Hand.")
+    @app_commands.command(name="comprar", description="Comando antigo desativado.")
     async def comprar(self, interaction: discord.Interaction, item: str) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         guild = interaction.guild
         if guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
@@ -2447,7 +2686,7 @@ class ClanCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="ranking_pontos", description="Mostra o ranking de Pontos de Apostolo.")
+    @app_commands.command(name="ranking_pontos", description="Mostra o ranking atual de participacao para o torneio.")
     async def ranking_pontos(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
@@ -2455,20 +2694,25 @@ class ClanCog(commands.Cog):
 
         rows = self.bot.database.list_top_apostle_balances(interaction.guild.id, limit=10)
         if not rows:
-            await interaction.response.send_message("Ainda nao ha Pontos de Apostolo registrados.", ephemeral=True)
+            await interaction.response.send_message("Ainda nao ha pontos de participacao registrados.", ephemeral=True)
             return
 
+        minimum = self.bot.get_tournament_min_points(interaction.guild.id)
         lines = []
         for index, row in enumerate(rows, start=1):
             member = interaction.guild.get_member(row["user_id"])
             display_name = member.mention if member else row["user_tag"]
-            lines.append(f"**{index}.** {display_name} - `{format_points(int(row['balance']))}`")
+            balance = int(row["balance"])
+            badge = " | elegivel" if minimum > 0 and balance >= minimum else ""
+            lines.append(f"**{index}.** {display_name} - `{format_points(balance)}`{badge}")
 
-        embed = self.build_embed("Ranking de Pontos de Apostolo", color=discord.Color.gold())
+        embed = self.build_embed("Ranking de participacao", color=discord.Color.gold())
         embed.description = "\n".join(lines)
+        if minimum > 0:
+            embed.set_footer(text=f"Minimo atual para o torneio: {format_points(minimum)} pontos")
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="ajustar_pontos", description="Adiciona ou remove Pontos de Apostolo de um membro.")
+    @app_commands.command(name="ajustar_pontos", description="Adiciona ou remove pontos de participacao de um membro.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def ajustar_pontos(
         self,
@@ -2499,14 +2743,13 @@ class ClanCog(commands.Cog):
             user_id=usuario.id,
             user_tag=str(usuario),
             amount=quantia,
-            transaction_type="admin_adjustment",
+            transaction_type="bonus" if quantia > 0 else "manutencao",
             details=motivo or "Ajuste manual da staff",
             counterparty_id=interaction.user.id,
             counterparty_tag=str(interaction.user),
             balance_after=new_balance,
         )
-        if quantia > 0:
-            await self.bot.refresh_apostle_progression(usuario, previous_total_earned=earned_before)
+        await self.bot.refresh_apostle_progression(usuario, previous_total_earned=earned_before)
 
         action_word = "adicionados" if quantia > 0 else "removidos"
         await interaction.response.send_message(
@@ -2514,13 +2757,15 @@ class ClanCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="desafiar_jogador", description="Desafia outro jogador para um pvp apostando Pontos de Apostolo.")
+    @app_commands.command(name="desafiar_jogador", description="Comando antigo desativado.")
     async def desafiar_jogador(
         self,
         interaction: discord.Interaction,
         jogador: discord.Member,
         quantia: int,
     ) -> None:
+        await self.bot.send_participation_only_notice(interaction)
+        return
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
             return
@@ -2769,9 +3014,16 @@ class ClanBot(commands.Bot):
             "help_notify_role_id": stored.get("help_notify_role_id"),
             "ticket_panel_channel_id": stored.get("ticket_panel_channel_id"),
             "ticket_panel_message_id": stored.get("ticket_panel_message_id"),
+            "tournament_min_points": int(stored.get("tournament_min_points") or 0),
             "automod_enabled": bool(stored.get("automod_enabled", 1)),
             "anti_raid_enabled": bool(stored.get("anti_raid_enabled", 1)),
         }
+
+    def get_tournament_min_points(self, guild_id: int) -> int:
+        return int(self.get_feature_settings(guild_id)["tournament_min_points"])
+
+    def get_current_participation_season_start(self, guild_id: int) -> str | None:
+        return self.database.get_latest_apostle_reset_at(guild_id)
 
     def get_help_notify_role(self, guild: discord.Guild) -> discord.Role | None:
         role_id = self.get_feature_settings(guild.id)["help_notify_role_id"]
@@ -2783,6 +3035,64 @@ class ClanBot(commands.Bot):
         else:
             await interaction.response.send_message(message, ephemeral=True)
 
+    async def send_participation_only_notice(self, interaction: discord.Interaction) -> None:
+        await self.send_ephemeral_response(interaction, PARTICIPATION_DISABLED_MESSAGE)
+
+    async def award_participation_points(
+        self,
+        member: discord.Member,
+        *,
+        category: str,
+        reason: str,
+        amount: int | None = None,
+        actor: discord.abc.User | None = None,
+        log_to_channel: bool = True,
+    ) -> int:
+        points = amount if amount is not None else int(PARTICIPATION_CATEGORY_DEFINITIONS.get(category, {}).get("default_points", 0))
+        if points == 0:
+            return self.get_apostle_balance(member.guild.id, member.id)
+
+        previous_total = self.get_apostle_progress_total(member.guild.id, member.id)
+        new_balance = self.database.adjust_apostle_balance(member.guild.id, member.id, str(member), points)
+        if new_balance is None:
+            return self.get_apostle_balance(member.guild.id, member.id)
+
+        self.database.log_apostle_transaction(
+            guild_id=member.guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            amount=points,
+            transaction_type=category,
+            details=reason,
+            counterparty_id=getattr(actor, "id", None),
+            counterparty_tag=str(actor) if actor is not None else None,
+            balance_after=new_balance,
+        )
+        await self.refresh_apostle_progression(member, previous_total_earned=previous_total)
+
+        if log_to_channel:
+            embed = discord.Embed(
+                title="Pontos de participacao atualizados",
+                color=discord.Color.dark_gold(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.add_field(name="Membro", value=f"{member.mention} (`{member.id}`)", inline=False)
+            embed.add_field(name="Categoria", value=participation_category_label(category), inline=True)
+            embed.add_field(name="Pontos", value=f"`+{format_points(points)}`", inline=True)
+            embed.add_field(name="Saldo atual", value=f"`{format_points(new_balance)}`", inline=True)
+            embed.add_field(name="Motivo", value=trim_text(reason, 1024), inline=False)
+            if actor is not None:
+                embed.add_field(name="Registrado por", value=f"{actor.mention} (`{actor.id}`)", inline=False)
+            embed.set_footer(text="God Hand | Participacao sazonal")
+            log_channel = self.get_log_channel(member.guild)
+            if log_channel is not None:
+                try:
+                    await log_channel.send(embed=embed)
+                except discord.HTTPException:
+                    logger.exception("Falha ao enviar log de participacao em %s", member.guild.name)
+
+        return new_balance
+
     def build_player_duel_view(self) -> PlayerDuelView:
         return PlayerDuelView(self)
 
@@ -2793,17 +3103,24 @@ class ClanBot(commands.Bot):
         balance: int,
         color: discord.Color | int | None = None,
     ) -> discord.Embed:
+        minimum = self.get_tournament_min_points(member.guild.id)
+        remaining = max(0, minimum - balance)
+        eligible = balance >= minimum if minimum > 0 else True
         embed = discord.Embed(
-            title="Carteira de Pontos de Apostolo",
+            title="Pontuacao de participacao",
             color=color or discord.Color.dark_red(),
             timestamp=discord.utils.utcnow(),
         )
-        embed.description = "Sua reserva atual para apostas, desafios e futuros minigames."
+        embed.description = "Essa e a pontuacao sazonal usada para definir vaga no torneio mensal."
         embed.add_field(name="Jogador", value=f"{member.mention}\n`{member.id}`", inline=True)
-        embed.add_field(name="Saldo", value=f"`{format_points(balance)}` pontos", inline=True)
+        embed.add_field(name="Pontos atuais", value=f"`{format_points(balance)}`", inline=True)
+        embed.add_field(name="Minimo do torneio", value=f"`{format_points(minimum)}`", inline=True)
+        embed.add_field(name="Elegivel", value="Sim" if eligible else "Ainda nao", inline=True)
+        if not eligible and minimum > 0:
+            embed.add_field(name="Faltam", value=f"`{format_points(remaining)}` pontos", inline=False)
         if member.display_avatar:
             embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="God Hand | Economia base")
+        embed.set_footer(text="God Hand | Participacao sazonal do torneio")
         return embed
 
     def get_apostle_shop_item(self, query: str) -> ApostleShopItem | None:
@@ -2827,7 +3144,7 @@ class ClanBot(commands.Bot):
         return None
 
     def get_apostle_progress_total(self, guild_id: int, user_id: int) -> int:
-        return self.database.get_apostle_transaction_summary(guild_id, user_id)["earned"]
+        return self.get_apostle_balance(guild_id, user_id)
 
     def get_unlocked_apostle_progression_titles(self, guild_id: int, user_id: int) -> list[ApostleProgressionTitle]:
         total_earned = self.get_apostle_progress_total(guild_id, user_id)
@@ -2936,16 +3253,20 @@ class ClanBot(commands.Bot):
     def build_apostle_profile_embed(self, member: discord.Member) -> discord.Embed:
         balance = self.get_apostle_balance(member.guild.id, member.id)
         profile = self.get_apostle_profile(member.guild.id, member.id, str(member))
-        totals = self.database.get_apostle_transaction_summary(member.guild.id, member.id)
-        inventory = self.database.list_apostle_inventory(member.guild.id, member.id)
+        season_start = self.get_current_participation_season_start(member.guild.id)
+        totals = self.database.get_apostle_transaction_summary(member.guild.id, member.id, since=season_start)
+        breakdown = self.database.get_apostle_transaction_breakdown(member.guild.id, member.id, since=season_start, limit=6)
         unlocked_titles = self.get_unlocked_apostle_progression_titles(member.guild.id, member.id)
         highest_title = unlocked_titles[-1] if unlocked_titles else None
         next_title = self.get_next_apostle_progression_title(member.guild.id, member.id)
         synced_title, synced_role = self.get_highest_configured_apostle_title_role(member)
-        recent_transactions = self.database.list_recent_apostle_transactions(member.guild.id, member.id, limit=5)
+        recent_transactions = self.database.list_recent_apostle_transactions(member.guild.id, member.id, limit=5, since=season_start)
+        minimum = self.get_tournament_min_points(member.guild.id)
+        remaining = max(0, minimum - balance)
+        eligible = balance >= minimum if minimum > 0 else True
 
         embed = discord.Embed(
-            title="Perfil de Apostolo",
+            title="Perfil de participacao",
             color=discord.Color.dark_red(),
             timestamp=discord.utils.utcnow(),
         )
@@ -2954,32 +3275,28 @@ class ClanBot(commands.Bot):
         progress_lines = [
             f"**Titulo equipado:** {title_text}",
             f"**Insignia equipada:** {badge_text}",
-            f"**Patamar atual:** {highest_title.name if highest_title else 'Nenhum titulo progressivo desbloqueado'}",
+            f"**Patamar atual:** {highest_title.name if highest_title else 'Nenhum titulo sazonal desbloqueado'}",
         ]
         if next_title is not None:
-            missing_points = max(0, next_title.required_points - totals["earned"])
+            missing_points = max(0, next_title.required_points - balance)
             progress_lines.append(
-                f"**Proximo titulo:** {next_title.name} (faltam `{format_points(missing_points)}` pontos acumulados)"
+                f"**Proximo titulo:** {next_title.name} (faltam `{format_points(missing_points)}` pontos nesta temporada)"
             )
         else:
-            progress_lines.append("**Proximo titulo:** Todos os marcos base ja foram desbloqueados.")
+            progress_lines.append("**Proximo titulo:** Todos os marcos sazonais ja foram desbloqueados.")
         if synced_title is not None and synced_role is not None:
             progress_lines.append(f"**Cargo automatico ativo:** {synced_role.mention} ({synced_title.name})")
+        progress_lines.append(f"**Minimo do torneio:** `{format_points(minimum)}`")
+        progress_lines.append(f"**Elegibilidade atual:** {'Sim' if eligible else f'Faltam {format_points(remaining)} pontos'}")
         embed.description = "\n".join(progress_lines)
         embed.add_field(name="Jogador", value=f"{member.mention}\n`{member.id}`", inline=True)
-        embed.add_field(name="Saldo", value=f"`{format_points(balance)}` pontos", inline=True)
-        embed.add_field(name="Streak diario", value=str(profile.get("daily_streak", 0)), inline=True)
-        embed.add_field(name="Total ganho", value=f"`{format_points(totals['earned'])}`", inline=True)
-        embed.add_field(name="Total gasto", value=f"`{format_points(totals['spent'])}`", inline=True)
+        embed.add_field(name="Pontos atuais", value=f"`{format_points(balance)}`", inline=True)
+        embed.add_field(name="Apto ao torneio", value="Sim" if eligible else "Ainda nao", inline=True)
+        embed.add_field(name="Pontos ganhos na temporada", value=f"`{format_points(totals['earned'])}`", inline=True)
+        embed.add_field(name="Ajustes / resets", value=f"`{format_points(totals['spent'])}`", inline=True)
         embed.add_field(
-            name="Itens no inventario",
-            value=str(sum(int(item["quantity"]) for item in inventory) + len(unlocked_titles)),
-            inline=True,
-        )
-        embed.add_field(name="Titulos desbloqueados", value=str(len(unlocked_titles)), inline=True)
-        embed.add_field(
-            name="Ultimo diario",
-            value=format_discord_timestamp(profile.get("last_daily_claim_at"), "R"),
+            name="Temporada atual",
+            value=format_discord_timestamp(season_start, "f") if season_start else "Desde o inicio do sistema",
             inline=False,
         )
         if unlocked_titles:
@@ -2991,17 +3308,25 @@ class ClanBot(commands.Bot):
                 ),
                 inline=False,
             )
+        if breakdown:
+            breakdown_lines = [
+                f"- **{participation_category_label(row['transaction_type'])}:** `{format_points(int(row['total_points']))}`"
+                for row in breakdown
+                if int(row["total_points"]) > 0
+            ]
+            if breakdown_lines:
+                embed.add_field(name="De onde vieram os pontos", value="\n".join(breakdown_lines[:6]), inline=False)
         if recent_transactions:
             lines = []
             for row in recent_transactions[:5]:
                 sign = "+" if row["amount"] > 0 else ""
                 lines.append(
-                    f"`{sign}{format_points(int(row['amount']))}` {row['transaction_type']} ({format_discord_timestamp(row['created_at'], 'R')})"
+                    f"`{sign}{format_points(int(row['amount']))}` {participation_category_label(row['transaction_type'])} ({format_discord_timestamp(row['created_at'], 'R')})"
                 )
             embed.add_field(name="Movimentacoes recentes", value="\n".join(lines), inline=False)
         if member.display_avatar:
             embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="God Hand | Economia e interacao")
+        embed.set_footer(text="God Hand | Participacao sazonal do torneio")
         return embed
 
     def get_action_cooldown_remaining(self, guild_id: int, user_id: int, action_key: str) -> timedelta | None:
@@ -4062,6 +4387,11 @@ class ClanBot(commands.Bot):
                 await archive_channel.send(embed=archive_embed)
             except discord.HTTPException:
                 logger.exception("Falha ao arquivar avaliacao de grade em %s", guild.name)
+        await self.bot.award_participation_points(
+            member,
+            category="avaliacao",
+            reason=f"Concluiu a avaliacao de grade de {target_member.display_name}.",
+        )
         await interaction.followup.send(
             f"Grade {selected_role.mention} | {selected_subtier_role.mention} aplicada com sucesso em {target_member.mention}.",
             ephemeral=True,
@@ -4445,6 +4775,11 @@ class ClanBot(commands.Bot):
         result_embed.add_field(name="Resultado", value="Troca de grade efetuada." if challenger_won else "O desafiado manteve a grade.", inline=False)
 
         await channel.send(embed=result_embed)
+        await self.bot.award_participation_points(
+            member,
+            category="arbitragem",
+            reason=f"Finalizou o desafio de grade entre {challenger.display_name} e {challenged.display_name}.",
+        )
         await interaction.followup.send("Resultado do desafio registrado com sucesso.", ephemeral=True)
 
     async def register_grade_challenge_dodge_from_interaction(self, interaction: discord.Interaction) -> None:
@@ -4555,6 +4890,11 @@ class ClanBot(commands.Bot):
             embed.add_field(name="Aviso", value="Com 3 dodges o membro desce uma grade.", inline=False)
 
         await channel.send(embed=embed)
+        await self.bot.award_participation_points(
+            member,
+            category="arbitragem",
+            reason=f"Registrou dodge no desafio de grade de {challenged.display_name}.",
+        )
         await interaction.followup.send("Dodge registrado com sucesso.", ephemeral=True)
 
     async def claim_ticket_from_interaction(self, interaction: discord.Interaction) -> None:

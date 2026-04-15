@@ -201,6 +201,7 @@ class Database:
                 help_notify_role_id INTEGER,
                 ticket_panel_channel_id INTEGER,
                 ticket_panel_message_id INTEGER,
+                tournament_min_points INTEGER NOT NULL DEFAULT 0,
                 automod_enabled INTEGER NOT NULL DEFAULT 1,
                 anti_raid_enabled INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL
@@ -467,6 +468,7 @@ class Database:
         )
         self._ensure_column("guild_settings", "evaluation_channel_id", "INTEGER")
         self._ensure_column("guild_settings", "watch_channel_id", "INTEGER")
+        self._ensure_column("guild_feature_settings", "tournament_min_points", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("grade_assessments", "assigned_subtier_role_id", "INTEGER")
         self._ensure_column("grade_assessments", "assigned_subtier_role_name", "TEXT")
         self.connection.commit()
@@ -969,6 +971,7 @@ class Database:
             "help_notify_role_id": None,
             "ticket_panel_channel_id": None,
             "ticket_panel_message_id": None,
+            "tournament_min_points": 0,
             "automod_enabled": 1,
             "anti_raid_enabled": 1,
             "updated_at": utcnow_iso(),
@@ -983,14 +986,16 @@ class Database:
                 help_notify_role_id,
                 ticket_panel_channel_id,
                 ticket_panel_message_id,
+                tournament_min_points,
                 automod_enabled,
                 anti_raid_enabled,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id) DO UPDATE SET
                 help_notify_role_id = excluded.help_notify_role_id,
                 ticket_panel_channel_id = excluded.ticket_panel_channel_id,
                 ticket_panel_message_id = excluded.ticket_panel_message_id,
+                tournament_min_points = excluded.tournament_min_points,
                 automod_enabled = excluded.automod_enabled,
                 anti_raid_enabled = excluded.anti_raid_enabled,
                 updated_at = excluded.updated_at
@@ -1000,6 +1005,7 @@ class Database:
                 current["help_notify_role_id"],
                 current["ticket_panel_channel_id"],
                 current["ticket_panel_message_id"],
+                current["tournament_min_points"],
                 current["automod_enabled"],
                 current["anti_raid_enabled"],
                 current["updated_at"],
@@ -1272,6 +1278,19 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_apostle_balances(self, guild_id: int, *, only_non_zero: bool = False) -> list[dict[str, Any]]:
+        query = """
+            SELECT *
+            FROM apostle_balances
+            WHERE guild_id = ?
+        """
+        params: list[Any] = [guild_id]
+        if only_non_zero:
+            query += " AND balance != 0"
+        query += " ORDER BY balance DESC, user_tag ASC"
+        rows = self.connection.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
     def get_apostle_profile(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT * FROM apostle_profiles WHERE guild_id = ? AND user_id = ?",
@@ -1434,35 +1453,100 @@ class Database:
         self.connection.commit()
         return new_quantity
 
-    def get_apostle_transaction_summary(self, guild_id: int, user_id: int) -> dict[str, int]:
-        earned = self.connection.execute(
+    def get_latest_apostle_reset_at(self, guild_id: int) -> str | None:
+        row = self.connection.execute(
             """
+            SELECT MAX(created_at) AS latest_reset
+            FROM apostle_transactions
+            WHERE guild_id = ? AND transaction_type = 'tournament_reset'
+            """,
+            (guild_id,),
+        ).fetchone()
+        return row["latest_reset"] if row and row["latest_reset"] else None
+
+    def get_apostle_transaction_summary(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        since: str | None = None,
+    ) -> dict[str, int]:
+        earned_query = """
             SELECT COALESCE(SUM(amount), 0)
             FROM apostle_transactions
             WHERE guild_id = ? AND user_id = ? AND amount > 0
-            """,
-            (guild_id, user_id),
-        ).fetchone()[0]
-        spent = self.connection.execute(
-            """
+        """
+        spent_query = """
             SELECT COALESCE(SUM(ABS(amount)), 0)
             FROM apostle_transactions
             WHERE guild_id = ? AND user_id = ? AND amount < 0
-            """,
-            (guild_id, user_id),
+        """
+        params: list[Any] = [guild_id, user_id]
+        if since is not None:
+            earned_query += " AND created_at >= ?"
+            spent_query += " AND created_at >= ?"
+            params.append(since)
+        earned = self.connection.execute(
+            earned_query,
+            tuple(params),
+        ).fetchone()[0]
+        spent_params = [guild_id, user_id]
+        if since is not None:
+            spent_params.append(since)
+        spent = self.connection.execute(
+            spent_query,
+            tuple(spent_params),
         ).fetchone()[0]
         return {"earned": int(earned or 0), "spent": int(spent or 0)}
 
-    def list_recent_apostle_transactions(self, guild_id: int, user_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            """
+    def get_apostle_transaction_breakdown(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        since: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        query = """
+            SELECT transaction_type, COALESCE(SUM(amount), 0) AS total_points, COUNT(*) AS total_events
+            FROM apostle_transactions
+            WHERE guild_id = ? AND user_id = ?
+        """
+        params: list[Any] = [guild_id, user_id]
+        if since is not None:
+            query += " AND created_at >= ?"
+            params.append(since)
+        query += """
+            GROUP BY transaction_type
+            ORDER BY total_points DESC, total_events DESC, transaction_type ASC
+            LIMIT ?
+        """
+        params.append(limit)
+        rows = self.connection.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_recent_apostle_transactions(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        limit: int = 10,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = """
             SELECT * FROM apostle_transactions
             WHERE guild_id = ? AND user_id = ?
+        """
+        params: list[Any] = [guild_id, user_id]
+        if since is not None:
+            query += " AND created_at >= ?"
+            params.append(since)
+        query += """
             ORDER BY created_at DESC
             LIMIT ?
-            """,
-            (guild_id, user_id, limit),
-        ).fetchall()
+        """
+        params.append(limit)
+        rows = self.connection.execute(query, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
     def list_apostle_user_ids(self, guild_id: int) -> list[int]:
@@ -1476,6 +1560,22 @@ class Database:
             (guild_id, guild_id),
         ).fetchall()
         return [int(row["user_id"]) for row in rows]
+
+    def reset_apostle_balances(self, guild_id: int) -> list[dict[str, Any]]:
+        existing = self.list_apostle_balances(guild_id, only_non_zero=True)
+        if not existing:
+            return []
+
+        self.connection.execute(
+            """
+            UPDATE apostle_balances
+            SET balance = 0, updated_at = ?
+            WHERE guild_id = ?
+            """,
+            (utcnow_iso(), guild_id),
+        )
+        self.connection.commit()
+        return existing
 
     def get_apostle_title_role(self, guild_id: int, title_key: str) -> dict[str, Any] | None:
         row = self.connection.execute(
