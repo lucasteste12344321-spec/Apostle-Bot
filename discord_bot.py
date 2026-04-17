@@ -1900,14 +1900,9 @@ class ClanCog(commands.Cog):
         current_subtier = self.bot.get_member_grade_subtier_role(member)
 
         next_test_text = "Disponivel agora"
-        if profile and profile.get("last_assessment_at"):
-            last_assessment = parse_iso_datetime(profile["last_assessment_at"])
-            if last_assessment is not None:
-                if last_assessment.tzinfo is None:
-                    last_assessment = last_assessment.replace(tzinfo=timezone.utc)
-                next_allowed = last_assessment + timedelta(days=7)
-                if next_allowed > discord.utils.utcnow():
-                    next_test_text = f"{discord.utils.format_dt(next_allowed, 'R')} ({discord.utils.format_dt(next_allowed, 'f')})"
+        next_allowed = self.bot.get_grade_test_cooldown_end(guild.id, member.id)
+        if next_allowed is not None:
+            next_test_text = f"{discord.utils.format_dt(next_allowed, 'R')} ({discord.utils.format_dt(next_allowed, 'f')})"
 
         embed = self.build_embed("Seu status competitivo", color=discord.Color.blurple())
         embed.description = "Resumo rapido da sua ficha no sistema de grades."
@@ -1926,6 +1921,12 @@ class ClanCog(commands.Cog):
             value=format_discord_timestamp(profile.get("last_assessment_at") if profile else None, "f"),
             inline=True,
         )
+        if profile and profile.get("manual_test_unlock_at"):
+            embed.add_field(
+                name="Liberacao manual",
+                value=format_discord_timestamp(profile.get("manual_test_unlock_at"), "f"),
+                inline=True,
+            )
         embed.add_field(
             name="Ultimo desafio",
             value=format_discord_timestamp(profile.get("last_challenge_at") if profile else None, "f"),
@@ -1938,6 +1939,54 @@ class ClanCog(commands.Cog):
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="resetar_tempo_teste_grade", description="Libera manualmente um membro para pedir teste de grade agora.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def resetar_tempo_teste_grade(
+        self,
+        interaction: discord.Interaction,
+        usuario: discord.Member,
+        motivo: str | None = None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        now_iso = discord.utils.utcnow().isoformat(timespec="seconds")
+        current_grade = self.bot.get_member_grade_role(usuario)
+        profile = self.bot.database.get_grade_profile(guild.id, usuario.id)
+        current_grade_role_id = current_grade.id if current_grade is not None else profile.get("current_grade_role_id") if profile else None
+        current_grade_role_name = current_grade.name if current_grade is not None else profile.get("current_grade_role_name") if profile else None
+
+        self.bot.database.upsert_grade_profile(
+            guild_id=guild.id,
+            user_id=usuario.id,
+            user_tag=str(usuario),
+            current_grade_role_id=current_grade_role_id,
+            current_grade_role_name=current_grade_role_name,
+            dodge_count=profile.get("dodge_count") if profile else 0,
+            last_assessment_at=profile.get("last_assessment_at") if profile else None,
+            manual_test_unlock_at=now_iso,
+            last_challenge_at=profile.get("last_challenge_at") if profile else None,
+        )
+
+        embed = self.build_embed("Tempo de teste resetado", color=discord.Color.green())
+        embed.description = (
+            f"{usuario.mention} foi liberado manualmente para pedir um novo teste de grade agora."
+        )
+        if motivo:
+            embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
+        embed.add_field(name="Liberado por", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Quando", value=format_discord_timestamp(now_iso, "f"), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        log_embed = self.build_embed("Cooldown de teste resetado", color=discord.Color.green())
+        log_embed.add_field(name="Membro", value=f"{usuario.mention} (`{usuario.id}`)", inline=False)
+        log_embed.add_field(name="Liberado por", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        if motivo:
+            log_embed.add_field(name="Motivo", value=trim_text(motivo, 1024), inline=False)
+        await self.emit_log(guild, log_embed)
 
     @app_commands.command(name="configurar_torneio_pontos", description="Define o minimo de pontos para participar do torneio.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -3146,6 +3195,28 @@ class ClanBot(commands.Bot):
     def get_apostle_progress_total(self, guild_id: int, user_id: int) -> int:
         return self.get_apostle_balance(guild_id, user_id)
 
+    def get_grade_test_cooldown_end(self, guild_id: int, user_id: int) -> datetime | None:
+        last_assessment = self.database.get_last_grade_assessment(guild_id, user_id)
+        if not last_assessment:
+            return None
+
+        last_completed_at = parse_iso_datetime(last_assessment.get("completed_at"))
+        if last_completed_at is None:
+            return None
+        if last_completed_at.tzinfo is None:
+            last_completed_at = last_completed_at.replace(tzinfo=timezone.utc)
+
+        profile = self.database.get_grade_profile(guild_id, user_id)
+        manual_unlock_at = parse_iso_datetime(profile.get("manual_test_unlock_at") if profile else None)
+        if manual_unlock_at is not None:
+            if manual_unlock_at.tzinfo is None:
+                manual_unlock_at = manual_unlock_at.replace(tzinfo=timezone.utc)
+            if manual_unlock_at >= last_completed_at:
+                return None
+
+        next_allowed = last_completed_at + timedelta(days=7)
+        return next_allowed if next_allowed > discord.utils.utcnow() else None
+
     def get_unlocked_apostle_progression_titles(self, guild_id: int, user_id: int) -> list[ApostleProgressionTitle]:
         total_earned = self.get_apostle_progress_total(guild_id, user_id)
         return [title_info for title_info in APOSTLE_PROGRESSION_TITLES if total_earned >= title_info.required_points]
@@ -3913,28 +3984,23 @@ class ClanBot(commands.Bot):
             )
             return
 
-        last_assessment = self.database.get_last_grade_assessment(guild.id, member.id)
-        if last_assessment:
-            last_time = parse_iso_datetime(last_assessment.get("completed_at"))
-            if last_time is not None:
-                next_allowed = last_time + timedelta(days=7)
-                now = discord.utils.utcnow()
-                if next_allowed > now:
-                    remaining = next_allowed - now
-                    total_hours = int(remaining.total_seconds() // 3600)
-                    days, hours = divmod(total_hours, 24)
-                    parts = []
-                    if days:
-                        parts.append(f"{days} dia(s)")
-                    if hours:
-                        parts.append(f"{hours} hora(s)")
-                    if not parts:
-                        parts.append("menos de 1 hora")
-                    await interaction.response.send_message(
-                        "Voce so pode pedir outra avaliacao em " + ", ".join(parts) + ".",
-                        ephemeral=True,
-                    )
-                    return
+        next_allowed = self.get_grade_test_cooldown_end(guild.id, member.id)
+        if next_allowed is not None:
+            remaining = next_allowed - discord.utils.utcnow()
+            total_hours = int(remaining.total_seconds() // 3600)
+            days, hours = divmod(total_hours, 24)
+            parts = []
+            if days:
+                parts.append(f"{days} dia(s)")
+            if hours:
+                parts.append(f"{hours} hora(s)")
+            if not parts:
+                parts.append("menos de 1 hora")
+            await interaction.response.send_message(
+                "Voce so pode pedir outra avaliacao em " + ", ".join(parts) + ".",
+                ephemeral=True,
+            )
+            return
 
         await interaction.response.defer(ephemeral=True)
         source_channel = interaction.channel if isinstance(interaction.channel, discord.abc.GuildChannel) else None

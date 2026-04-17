@@ -323,6 +323,7 @@ class Database:
                 current_grade_role_name TEXT,
                 dodge_count INTEGER NOT NULL DEFAULT 0,
                 last_assessment_at TEXT,
+                manual_test_unlock_at TEXT,
                 last_challenge_at TEXT,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
@@ -471,6 +472,7 @@ class Database:
         self._ensure_column("guild_feature_settings", "tournament_min_points", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("grade_assessments", "assigned_subtier_role_id", "INTEGER")
         self._ensure_column("grade_assessments", "assigned_subtier_role_name", "TEXT")
+        self._ensure_column("grade_profiles", "manual_test_unlock_at", "TEXT")
         self.connection.commit()
 
     def get_guild_settings(self, guild_id: int) -> dict[str, Any] | None:
@@ -2253,6 +2255,7 @@ class Database:
         current_grade_role_name: str | None,
         dodge_count: int | None = None,
         last_assessment_at: str | None = None,
+        manual_test_unlock_at: str | None = None,
         last_challenge_at: str | None = None,
     ) -> None:
         current = self.get_grade_profile(guild_id, user_id) or {
@@ -2263,6 +2266,7 @@ class Database:
             "current_grade_role_name": None,
             "dodge_count": 0,
             "last_assessment_at": None,
+            "manual_test_unlock_at": None,
             "last_challenge_at": None,
             "updated_at": utcnow_iso(),
         }
@@ -2273,6 +2277,8 @@ class Database:
             current["dodge_count"] = dodge_count
         if last_assessment_at is not None:
             current["last_assessment_at"] = last_assessment_at
+        if manual_test_unlock_at is not None:
+            current["manual_test_unlock_at"] = manual_test_unlock_at
         if last_challenge_at is not None:
             current["last_challenge_at"] = last_challenge_at
         current["updated_at"] = utcnow_iso()
@@ -2287,15 +2293,17 @@ class Database:
                 current_grade_role_name,
                 dodge_count,
                 last_assessment_at,
+                manual_test_unlock_at,
                 last_challenge_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id) DO UPDATE SET
                 user_tag = excluded.user_tag,
                 current_grade_role_id = excluded.current_grade_role_id,
                 current_grade_role_name = excluded.current_grade_role_name,
                 dodge_count = excluded.dodge_count,
                 last_assessment_at = excluded.last_assessment_at,
+                manual_test_unlock_at = excluded.manual_test_unlock_at,
                 last_challenge_at = excluded.last_challenge_at,
                 updated_at = excluded.updated_at
             """,
@@ -2307,6 +2315,7 @@ class Database:
                 current["current_grade_role_name"],
                 current["dodge_count"],
                 current["last_assessment_at"],
+                current["manual_test_unlock_at"],
                 current["last_challenge_at"],
                 current["updated_at"],
             ),
