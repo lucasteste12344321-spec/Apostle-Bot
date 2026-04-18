@@ -123,6 +123,11 @@ def normalize_lookup_text(value: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def parse_named_entries(raw_value: str) -> list[str]:
+    entries = [chunk.strip() for chunk in re.split(r"[\n,;]+", raw_value) if chunk.strip()]
+    return entries
+
+
 def format_duration(seconds: int | None) -> str:
     if not seconds:
         return "permanente"
@@ -363,6 +368,88 @@ def ticket_status_label(status: str) -> str:
 class ClanCog(commands.Cog):
     def __init__(self, bot: "ClanBot") -> None:
         self.bot = bot
+
+    def resolve_tournament_participants(
+        self,
+        guild: discord.Guild,
+        raw_value: str,
+    ) -> list[dict[str, str]]:
+        participants: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for entry in parse_named_entries(raw_value):
+            member = self.bot.find_member_by_hint(guild, entry)
+            if member is not None:
+                unique_key = f"member:{member.id}"
+                display_name = member.display_name
+                mention = member.mention
+            else:
+                unique_key = f"text:{normalize_lookup_text(entry)}"
+                display_name = entry
+                mention = entry
+
+            if unique_key in seen:
+                continue
+            seen.add(unique_key)
+            participants.append(
+                {
+                    "display": trim_text(display_name, 24),
+                    "mention": mention,
+                }
+            )
+        return participants
+
+    def build_classification_table_block(self, participants: list[dict[str, str]]) -> str:
+        lines = [
+            f"{'POS':<3} {'JOGADOR':<24} {'J':>2} {'V':>2} {'D':>2} {'PTS':>4}",
+            "-" * 43,
+        ]
+        for index, participant in enumerate(participants, start=1):
+            lines.append(f"{index:<3} {participant['display']:<24} {0:>2} {0:>2} {0:>2} {0:>4}")
+        return "```text\n" + "\n".join(lines) + "\n```"
+
+    def build_group_schedule_lines(self, group_participants: list[dict[str, str]], fights_per_match: int) -> list[str]:
+        lines: list[str] = []
+        for first_index in range(len(group_participants)):
+            for second_index in range(first_index + 1, len(group_participants)):
+                first_name = group_participants[first_index]["display"]
+                second_name = group_participants[second_index]["display"]
+                if fights_per_match <= 1:
+                    lines.append(f"- {first_name} x {second_name}")
+                else:
+                    for fight_number in range(1, fights_per_match + 1):
+                        lines.append(f"- {first_name} x {second_name} ({fight_number}/{fights_per_match})")
+        return lines
+
+    def build_elimination_bracket_block(self, participants: list[dict[str, str]]) -> str:
+        seeded_pairs = (
+            (0, 7, "QF1"),
+            (3, 4, "QF2"),
+            (1, 6, "QF3"),
+            (2, 5, "QF4"),
+        )
+        lines = ["Quartas de final"]
+        for first_seed, second_seed, match_label in seeded_pairs:
+            lines.append(
+                f"{match_label} | {first_seed + 1}o {participants[first_seed]['display']} x "
+                f"{second_seed + 1}o {participants[second_seed]['display']}"
+            )
+        lines.extend(
+            [
+                "",
+                "Semifinais",
+                "SF1 | Vencedor QF1 x Vencedor QF2",
+                "SF2 | Vencedor QF3 x Vencedor QF4",
+                "",
+                "Final",
+                "F | Vencedor SF1 x Vencedor SF2",
+            ]
+        )
+        return "```text\n" + "\n".join(lines) + "\n```"
+
+    def get_group_label(self, index: int) -> str:
+        if 0 <= index < 26:
+            return chr(65 + index)
+        return str(index + 1)
 
     async def cog_app_command_error(
         self,
@@ -2143,6 +2230,142 @@ class ClanCog(commands.Cog):
             f"**Perfis sincronizados:** `{synced}`"
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="tabela_classificacao_8",
+        description="Monta uma tabela de classificacao com 8 participantes e chaveamento sugerido.",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(
+        participantes="Liste exatamente 8 participantes separados por virgula, ponto e virgula ou quebra de linha.",
+        titulo="Titulo opcional para a tabela.",
+    )
+    async def tabela_classificacao_8(
+        self,
+        interaction: discord.Interaction,
+        participantes: str,
+        titulo: str | None = None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        resolved_participants = self.resolve_tournament_participants(guild, participantes)
+        if len(resolved_participants) != 8:
+            await interaction.response.send_message(
+                "Envie exatamente 8 participantes, na ordem da seed/classificacao inicial.",
+                ephemeral=True,
+            )
+            return
+
+        embed = self.build_embed(titulo or "Tabela de classificacao", color=discord.Color.dark_gold())
+        embed.description = (
+            "A ordem enviada vira a classificacao inicial do torneio.\n"
+            "Abaixo ja deixei uma sugestao de chaveamento padrao para 8 jogadores."
+        )
+        embed.add_field(
+            name="Classificacao inicial",
+            value=self.build_classification_table_block(resolved_participants),
+            inline=False,
+        )
+        embed.add_field(
+            name="Chaveamento sugerido",
+            value=self.build_elimination_bracket_block(resolved_participants),
+            inline=False,
+        )
+        embed.set_footer(text="God Hand | Seed 1 ao 8 na ordem enviada")
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(
+        name="fase_grupos",
+        description="Sorteia uma fase de grupos com tabela inicial e confrontos por grupo.",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(
+        participantes="Liste os participantes separados por virgula, ponto e virgula ou quebra de linha.",
+        grupos="Quantidade de grupos para o sorteio.",
+        lutas_por_confronto="Quantas lutas cada confronto vai ter dentro do grupo.",
+        titulo="Titulo opcional para a fase de grupos.",
+    )
+    async def fase_grupos(
+        self,
+        interaction: discord.Interaction,
+        participantes: str,
+        grupos: int,
+        lutas_por_confronto: int,
+        titulo: str | None = None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+        if grupos < 2:
+            await interaction.response.send_message("Use pelo menos 2 grupos.", ephemeral=True)
+            return
+        if lutas_por_confronto < 1:
+            await interaction.response.send_message("Cada confronto precisa ter pelo menos 1 luta.", ephemeral=True)
+            return
+
+        resolved_participants = self.resolve_tournament_participants(guild, participantes)
+        if len(resolved_participants) < grupos * 2:
+            await interaction.response.send_message(
+                "Cada grupo precisa ter pelo menos 2 participantes. Envie mais nomes ou reduza o numero de grupos.",
+                ephemeral=True,
+            )
+            return
+
+        shuffled_participants = resolved_participants[:]
+        random.shuffle(shuffled_participants)
+        group_buckets: list[list[dict[str, str]]] = [[] for _ in range(grupos)]
+        for index, participant in enumerate(shuffled_participants):
+            group_buckets[index % grupos].append(participant)
+
+        total_fights = 0
+        for bucket in group_buckets:
+            participant_count = len(bucket)
+            total_fights += ((participant_count * (participant_count - 1)) // 2) * lutas_por_confronto
+
+        await interaction.response.defer()
+        overview = self.build_embed(titulo or "Fase de grupos", color=discord.Color.blurple())
+        overview.description = (
+            "Sorteio concluido. Os grupos abaixo ja saem com tabela zerada e a previsao de confrontos."
+        )
+        overview.add_field(name="Participantes", value=f"`{len(resolved_participants)}`", inline=True)
+        overview.add_field(name="Grupos", value=f"`{grupos}`", inline=True)
+        overview.add_field(name="Lutas por confronto", value=f"`{lutas_por_confronto}`", inline=True)
+        overview.add_field(name="Total estimado de lutas", value=f"`{total_fights}`", inline=True)
+        overview.add_field(
+            name="Formato",
+            value="Sorteio aleatorio com distribuicao equilibrada entre os grupos.",
+            inline=False,
+        )
+        await interaction.followup.send(embed=overview)
+
+        for index, bucket in enumerate(group_buckets):
+            label = self.get_group_label(index)
+            group_embed = self.build_embed(f"Grupo {label}", color=discord.Color.dark_blue())
+            group_embed.description = "\n".join(
+                f"**{position}.** {participant['mention']}" for position, participant in enumerate(bucket, start=1)
+            )
+            group_embed.add_field(
+                name="Tabela inicial",
+                value=self.build_classification_table_block(bucket),
+                inline=False,
+            )
+            schedule_lines = self.build_group_schedule_lines(bucket, lutas_por_confronto)
+            if schedule_lines:
+                schedule_preview = "\n".join(schedule_lines)
+                if len(schedule_preview) > 1000:
+                    hidden_count = max(0, len(schedule_lines) - 18)
+                    schedule_preview = "\n".join(schedule_lines[:18])
+                    if hidden_count:
+                        schedule_preview += f"\n... e mais {hidden_count} confronto(s)."
+            else:
+                schedule_preview = "Grupo sem confrontos suficientes para montar calendario."
+            group_embed.add_field(name="Confrontos", value=trim_text(schedule_preview, 1024), inline=False)
+            group_embed.set_footer(text=f"God Hand | Grupo {label}")
+            await interaction.followup.send(embed=group_embed)
 
     @app_commands.command(name="saldo", description="Mostra sua pontuacao atual de participacao para o torneio.")
     async def saldo(self, interaction: discord.Interaction, usuario: discord.Member | None = None) -> None:
@@ -3974,14 +4197,6 @@ class ClanBot(commands.Bot):
 
         if self.database.get_blacklist_entry(guild.id, member.id):
             await interaction.response.send_message("Voce esta na blacklist e nao pode abrir esse ticket.", ephemeral=True)
-            return
-
-        clan_role = self.get_clan_member_role(guild)
-        if clan_role is not None and clan_role not in member.roles:
-            await interaction.response.send_message(
-                f"Voce precisa ter o cargo {clan_role.mention} para pedir teste.",
-                ephemeral=True,
-            )
             return
 
         next_allowed = self.get_grade_test_cooldown_end(guild.id, member.id)
