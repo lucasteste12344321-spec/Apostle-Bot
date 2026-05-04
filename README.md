@@ -10,6 +10,7 @@ Bot de Discord em Python para:
 - abrir painel de tickets para suporte, recrutamento, parceria e denuncia
 - abrir ticket de teste de grade com avaliador assumindo, notas e atribuicao de grade por botoes
 - abrir ticket de desafio de grade com arbitragem, liberacao do server, resultado e dodge
+- abrir prova God Hand para Grade 1 High com fila automatica de FT5 contra os outros elegiveis
 - arquivar avaliacoes finalizadas em um canal proprio com embeds mais bonitas
 - aplicar warn, timeout, kick, ban e blacklist
 - registrar presenca do cla, ranking de ajuda e historicos
@@ -74,7 +75,7 @@ Passo a passo:
    - `DISCORD_TOKEN`
    - `DATABASE_PATH=/data/bot.sqlite3`
    - `BOT_LOG_PATH=/data/bot.log`
-   - opcionalmente `DATA_DIR=/data`, `DEV_GUILD_ID`, `LOG_CHANNEL_ID`, `REPORT_CHANNEL_ID`, `HELP_CHANNEL_ID`, `CLAN_MEMBER_ROLE_ID`, `EVALUATOR_ROLE_ID`, `REFEREE_ROLE_ID`, `REFEREE_ROLE_NAME`, `GRADE_ROLE_IDS`, `GRADE_ROLE_LABELS`, `GRADE_SUBTIER_ROLE_IDS`, `GRADE_SUBTIER_LABELS`, `DASHBOARD_PORT` e `DASHBOARD_TOKEN`
+   - opcionalmente `DATA_DIR=/data`, `DEV_GUILD_ID`, `LOG_CHANNEL_ID`, `REPORT_CHANNEL_ID`, `HELP_CHANNEL_ID`, `CLAN_MEMBER_ROLE_ID`, `EVALUATOR_ROLE_ID`, `REFEREE_ROLE_ID`, `REFEREE_ROLE_NAME`, `GOD_HAND_ROLE_ID`, `GOD_HAND_ROLE_NAME`, `GRADE_ROLE_IDS`, `GRADE_ROLE_LABELS`, `GRADE_SUBTIER_ROLE_IDS`, `GRADE_SUBTIER_LABELS`, `GOD_HAND_TRIAL_GRADE_LABEL`, `GOD_HAND_TRIAL_SUBTIER_LABEL`, `DASHBOARD_PORT` e `DASHBOARD_TOKEN`
 5. Em `Volumes`, crie um volume e monte em `/data`.
 6. Faca o primeiro deploy.
 
@@ -109,6 +110,7 @@ No `/painel_grades`, os botoes atuais incluem:
 
 - `Pedir teste`
 - `Desafio de grade`
+- `Prova God Hand`
 
 ## Comandos
 
@@ -164,7 +166,7 @@ No `/painel_grades`, os botoes atuais incluem:
 
 ## Sistema de grade
 
-O painel de grades agora inclui dois fluxos competitivos:
+O painel de grades agora inclui tres fluxos competitivos:
 
 - `Pedir teste`
   - verifica se o membro tem o cargo configurado em `CLAN_MEMBER_ROLE_ID`
@@ -186,11 +188,22 @@ O painel de grades agora inclui dois fluxos competitivos:
   - se o desafiante vencer, o bot troca as grades
   - com 3 dodges, o desafiado desce uma grade
 
+- `Prova God Hand`
+  - so abre para quem estiver no cargo configurado em `GOD_HAND_TRIAL_GRADE_LABEL` + `GOD_HAND_TRIAL_SUBTIER_LABEL`
+  - o bot monta automaticamente a fila com os outros membros elegiveis
+  - se `GOD_HAND_ROLE_ID` ou `GOD_HAND_ROLE_NAME` estiver configurado, esses membros ficam fora da fila
+  - o ticket adiciona desafiante, fila elegivel e staff de arbitragem
+  - cada FT5 e registrado pelos botoes `Desafiante venceu FT5` ou `Oponente venceu FT5`
+  - uma derrota encerra a prova
+  - vencendo todos, o membro fica apto a desafiar a God Hand
+
 Observacoes:
 
 - A ordem das grades segue `GRADE_ROLE_IDS`.
 - Os nomes exibidos nos botoes seguem `GRADE_ROLE_LABELS`.
 - Os subtieres `low/mid/high` seguem `GRADE_SUBTIER_ROLE_IDS` ou nomes em `GRADE_SUBTIER_LABELS`.
+- A prova God Hand usa por padrao `Grade 1` + `High`, mas isso pode ser trocado em `GOD_HAND_TRIAL_GRADE_LABEL` e `GOD_HAND_TRIAL_SUBTIER_LABEL`.
+- Para excluir membros da propria God Hand da fila e pingar esse grupo na aprovacao, configure `GOD_HAND_ROLE_ID` ou `GOD_HAND_ROLE_NAME`.
 - Se o cargo de arbitro tiver acento, o ideal e definir `REFEREE_ROLE_ID`.
 - Para saber quem esta `online/offline` de verdade entre os avaliadores, o bot precisaria do `Presence Intent`. Sem isso, ele registra a demanda sem afirmar quem estava offline.
 - Se o canal de avaliacoes nao for configurado, o bot usa o canal de logs como fallback para arquivar as fichas finais.
@@ -288,6 +301,8 @@ Tabelas principais:
 - `grade_profiles`
 - `grade_assessments`
 - `grade_challenges`
+- `god_hand_trials`
+- `god_hand_trial_opponents`
 - `moderation_actions`
 - `blacklist_entries`
 - `presence_status`

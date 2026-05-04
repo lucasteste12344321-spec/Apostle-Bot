@@ -21,6 +21,7 @@ from discord.ext import commands
 from config import Settings
 from database import Database
 from views import (
+    GodHandTrialTicketView,
     GradeChallengeTicketView,
     GradePanelView,
     GradeTestTicketView,
@@ -351,6 +352,7 @@ def ticket_type_label(ticket_type: str) -> str:
         "partnership": "Parceria",
         "grade_test": "Teste de grade",
         "grade_challenge": "Desafio de grade",
+        "god_hand_trial": "Prova God Hand",
     }.get(ticket_type, ticket_type)
 
 
@@ -3168,6 +3170,7 @@ class ClanBot(commands.Bot):
         self.grade_panel_view = GradePanelView(self)
         self.grade_test_view = GradeTestTicketView(self)
         self.grade_challenge_view = GradeChallengeTicketView(self)
+        self.god_hand_trial_view = GodHandTrialTicketView(self)
         self.recent_messages: dict[tuple[int, int], deque[datetime]] = defaultdict(lambda: deque(maxlen=8))
         self.recent_joins: dict[int, deque[datetime]] = defaultdict(deque)
         self.recent_raid_alerts: dict[int, datetime] = {}
@@ -3182,6 +3185,7 @@ class ClanBot(commands.Bot):
         self.add_view(self.grade_panel_view)
         self.add_view(self.grade_test_view)
         self.add_view(self.grade_challenge_view)
+        self.add_view(self.god_hand_trial_view)
         self.add_view(PlayerDuelView(self))
         for panel in self.database.list_help_panels():
             self.add_view(HelpAvailabilityView(self), message_id=panel["message_id"])
@@ -3778,6 +3782,32 @@ class ClanBot(commands.Bot):
                 return role
         return None
 
+    def get_god_hand_role(self, guild: discord.Guild) -> discord.Role | None:
+        if self.settings.god_hand_role_id:
+            role = guild.get_role(self.settings.god_hand_role_id)
+            if role is not None:
+                return role
+
+        wanted = normalize_lookup_text(self.settings.god_hand_role_name)
+        for role in guild.roles:
+            if normalize_lookup_text(role.name) == wanted:
+                return role
+        return None
+
+    def get_grade_role_by_label(self, guild: discord.Guild, label: str) -> discord.Role | None:
+        wanted = normalize_lookup_text(label)
+        for role_id, configured_label in zip(self.settings.grade_role_ids, self.settings.grade_role_labels):
+            if normalize_lookup_text(configured_label) != wanted:
+                continue
+            role = guild.get_role(role_id)
+            if role is not None:
+                return role
+
+        for role in self.get_grade_roles(guild):
+            if normalize_lookup_text(role.name) == wanted:
+                return role
+        return None
+
     def get_grade_roles(self, guild: discord.Guild) -> list[discord.Role]:
         roles = []
         for role_id in self.settings.grade_role_ids:
@@ -3828,6 +3858,113 @@ class ClanBot(commands.Bot):
             if role.id in subtier_role_ids:
                 return role
         return None
+
+    def get_god_hand_trial_requirement_roles(self, guild: discord.Guild) -> tuple[discord.Role | None, discord.Role | None]:
+        grade_role = self.get_grade_role_by_label(guild, self.settings.god_hand_trial_grade_label)
+        subtier_role = self.find_grade_subtier_role(guild, self.settings.god_hand_trial_subtier_label)
+        return grade_role, subtier_role
+
+    def is_member_god_hand_trial_candidate(self, member: discord.Member) -> bool:
+        grade_role, subtier_role = self.get_god_hand_trial_requirement_roles(member.guild)
+        if grade_role is None or subtier_role is None:
+            return False
+        return grade_role in member.roles and subtier_role in member.roles
+
+    def get_god_hand_trial_opponents(
+        self,
+        guild: discord.Guild,
+        *,
+        challenger: discord.Member,
+    ) -> tuple[discord.Role | None, discord.Role | None, list[discord.Member]]:
+        grade_role, subtier_role = self.get_god_hand_trial_requirement_roles(guild)
+        god_hand_role = self.get_god_hand_role(guild)
+        if grade_role is None or subtier_role is None:
+            return grade_role, subtier_role, []
+
+        opponents: list[discord.Member] = []
+        for member in guild.members:
+            if member.bot or member.id == challenger.id:
+                continue
+            if grade_role not in member.roles or subtier_role not in member.roles:
+                continue
+            if god_hand_role is not None and god_hand_role in member.roles:
+                continue
+            opponents.append(member)
+
+        opponents.sort(key=lambda item: (normalize_lookup_text(item.display_name), item.id))
+        return grade_role, subtier_role, opponents
+
+    def format_god_hand_trial_opponents(
+        self,
+        guild: discord.Guild,
+        opponents: list[dict[str, Any]],
+    ) -> str:
+        lines = []
+        for entry in opponents:
+            member = guild.get_member(entry["opponent_id"])
+            mention = member.mention if member else entry["opponent_tag"]
+            status = entry["status"]
+            if status == "vencido":
+                prefix = "[OK]"
+            elif status == "venceu":
+                prefix = "[X]"
+            else:
+                prefix = "[...]"
+            lines.append(f"{prefix} {mention}")
+        return trim_text("\n".join(lines) or "Nenhum oponente registrado.", 1024)
+
+    def build_god_hand_trial_embed(
+        self,
+        guild: discord.Guild,
+        trial: dict[str, Any],
+        opponents: list[dict[str, Any]],
+    ) -> discord.Embed:
+        challenger = guild.get_member(trial["challenger_id"])
+        current_opponent = next((entry for entry in opponents if entry["status"] == "pendente"), None)
+        current_member = guild.get_member(current_opponent["opponent_id"]) if current_opponent else None
+
+        embed = discord.Embed(
+            title="Prova God Hand",
+            color=discord.Color.dark_gold(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.description = (
+            "Fluxo especial para liberar o desafio final contra a God Hand.\n"
+            "O desafiante precisa vencer cada FT5 contra os Grade 1 High elegiveis listados abaixo."
+        )
+        embed.add_field(
+            name="Desafiante",
+            value=challenger.mention if challenger else trial["challenger_tag"],
+            inline=False,
+        )
+        embed.add_field(
+            name="Requisito",
+            value=f"{trial.get('challenger_grade_role_name') or self.settings.god_hand_trial_grade_label} | "
+            f"{trial.get('challenger_subtier_role_name') or self.settings.god_hand_trial_subtier_label}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Progresso",
+            value=f"{int(trial['wins_completed'])}/{int(trial['total_opponents'])} FT5 vencidos",
+            inline=True,
+        )
+        embed.add_field(
+            name="Status",
+            value=str(trial["status"]).replace("_", " ").title(),
+            inline=True,
+        )
+        embed.add_field(
+            name="Oponente atual",
+            value=(current_member.mention if current_member else current_opponent["opponent_tag"]) if current_opponent else "Todos os FT5 concluidos",
+            inline=False,
+        )
+        embed.add_field(
+            name="Fila da prova",
+            value=self.format_god_hand_trial_opponents(guild, opponents),
+            inline=False,
+        )
+        embed.set_footer(text="Cada resultado encerra o FT5 atual e avanca para o proximo nome pendente.")
+        return embed
 
     def get_grade_subtier_index(self, role_name: str | None) -> int:
         if not role_name:
@@ -3890,7 +4027,7 @@ class ClanBot(commands.Bot):
 
         if ticket_type == "grade_test":
             add_role(self.get_evaluator_role(guild))
-        elif ticket_type == "grade_challenge":
+        elif ticket_type in {"grade_challenge", "god_hand_trial"}:
             add_role(self.get_referee_role(guild))
 
         for role in guild.roles:
@@ -3963,6 +4100,23 @@ class ClanBot(commands.Bot):
             "- low desafia low, mid desafia mid, high desafia high\n"
             "- recusar desafio conta dodge\n"
             "- com 3 dodges, desce uma grade"
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def show_god_hand_trial_rules(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="Regras da prova God Hand",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.description = (
+            "- so pode abrir se estiver em Grade 1 High\n"
+            "- a prova acontece em FT5\n"
+            "- o bot monta a fila com todos os outros Grade 1 High elegiveis\n"
+            "- se existir cargo God Hand configurado, esses membros ficam fora da fila\n"
+            "- a ordem atual segue a fila mostrada no ticket\n"
+            "- uma derrota encerra a prova\n"
+            "- vencendo todos, o membro fica apto a desafiar a God Hand"
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -4040,6 +4194,7 @@ class ClanBot(commands.Bot):
             "partnership": "ticket-parceria",
             "grade_test": "ticket-teste",
             "grade_challenge": "ticket-desafio",
+            "god_hand_trial": "ticket-godhand",
         }.get(ticket_type, "ticket")
         slug = slugify_channel_name(creator.display_name)
         channel_name = f"{prefix}-{slug}-{discord.utils.utcnow().strftime('%H%M%S')}"[:100]
@@ -4847,6 +5002,162 @@ class ClanBot(commands.Bot):
             ephemeral=True,
         )
 
+    async def open_god_hand_trial_request(self, interaction: discord.Interaction, *, details: str | None) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse painel so funciona no servidor.", ephemeral=True)
+            return
+
+        challenger = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if challenger is None:
+            await interaction.response.send_message("Nao consegui localizar seu usuario no servidor.", ephemeral=True)
+            return
+
+        if self.database.get_blacklist_entry(guild.id, challenger.id):
+            await interaction.response.send_message("Voce esta na blacklist e nao pode abrir esse ticket.", ephemeral=True)
+            return
+
+        active_trial = self.database.get_active_god_hand_trial_for_challenger(guild.id, challenger.id)
+        if active_trial is not None:
+            existing_channel = guild.get_channel(active_trial["channel_id"]) if active_trial.get("channel_id") else None
+            channel_text = existing_channel.mention if isinstance(existing_channel, discord.TextChannel) else "o ticket que ja esta aberto"
+            await interaction.response.send_message(
+                f"Voce ja tem uma prova God Hand em andamento em {channel_text}.",
+                ephemeral=True,
+            )
+            return
+
+        if self.database.has_passed_god_hand_trial(guild.id, challenger.id):
+            await interaction.response.send_message(
+                "Voce ja venceu uma prova God Hand e ja esta apto a desafiar a God Hand.",
+                ephemeral=True,
+            )
+            return
+
+        required_grade_role, required_subtier_role, opponents = self.get_god_hand_trial_opponents(guild, challenger=challenger)
+        if required_grade_role is None or required_subtier_role is None:
+            await interaction.response.send_message(
+                "Nao consegui localizar os cargos configurados para a prova God Hand.",
+                ephemeral=True,
+            )
+            return
+
+        if required_grade_role not in challenger.roles or required_subtier_role not in challenger.roles:
+            await interaction.response.send_message(
+                f"Essa prova e exclusiva para membros com `{required_grade_role.name}` e `{required_subtier_role.name}`.",
+                ephemeral=True,
+            )
+            return
+
+        if not opponents:
+            await interaction.response.send_message(
+                "Nao encontrei outros membros elegiveis para montar a prova God Hand agora.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        source_channel = interaction.channel if isinstance(interaction.channel, discord.abc.GuildChannel) else None
+        subject = "Prova God Hand"
+        try:
+            ticket_channel, staff_roles = await self.create_private_ticket_channel(
+                guild=guild,
+                creator=challenger,
+                ticket_type="god_hand_trial",
+                subject=subject,
+                source_channel=source_channel,
+                extra_members=opponents,
+            )
+        except RuntimeError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Nao consegui criar o ticket da prova God Hand. Verifique `Manage Channels`.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            await interaction.followup.send("O Discord recusou a criacao do ticket agora.", ephemeral=True)
+            return
+
+        metadata = {
+            "details": details or "",
+            "opponent_ids": [member.id for member in opponents],
+        }
+        ticket_id = self.database.create_ticket(
+            guild_id=guild.id,
+            channel_id=ticket_channel.id,
+            creator_id=challenger.id,
+            creator_tag=str(challenger),
+            creator_display_name=challenger.display_name,
+            ticket_type="god_hand_trial",
+            subject=subject,
+            metadata=metadata,
+        )
+        trial_id = self.database.create_god_hand_trial(
+            guild_id=guild.id,
+            ticket_id=ticket_id,
+            challenger_id=challenger.id,
+            challenger_tag=str(challenger),
+            challenger_grade_role_id=required_grade_role.id,
+            challenger_grade_role_name=required_grade_role.name,
+            challenger_subtier_role_id=required_subtier_role.id,
+            challenger_subtier_role_name=required_subtier_role.name,
+            total_opponents=len(opponents),
+        )
+        self.database.add_god_hand_trial_opponents(
+            trial_id,
+            [
+                {
+                    "opponent_id": member.id,
+                    "opponent_tag": str(member),
+                    "opponent_display_name": member.display_name,
+                    "sequence_index": index,
+                }
+                for index, member in enumerate(opponents, start=1)
+            ],
+        )
+        self.database.log_ticket_event(
+            ticket_id=ticket_id,
+            guild_id=guild.id,
+            channel_id=ticket_channel.id,
+            actor_id=challenger.id,
+            actor_tag=str(challenger),
+            event_type="god_hand_trial_created",
+            details=details or f"{len(opponents)} oponentes elegiveis",
+        )
+
+        trial = self.database.get_god_hand_trial(trial_id)
+        opponent_rows = self.database.list_god_hand_trial_opponents(trial_id)
+        if trial is None:
+            await interaction.followup.send("Falhei ao registrar a prova God Hand no banco.", ephemeral=True)
+            return
+
+        embed = self.build_god_hand_trial_embed(guild, trial, opponent_rows)
+        if details:
+            embed.add_field(name="Observacoes", value=trim_text(details, 1024), inline=False)
+
+        staff_mentions = " ".join(role.mention for role in staff_roles[:10])
+        opponent_mentions = " ".join(member.mention for member in opponents[:20])
+        intro = (
+            f"{challenger.mention}\n"
+            f"{opponent_mentions}\n"
+            f"{staff_mentions}\n"
+            "A arbitragem pode assumir a prova e registrar cada FT5 pelos botoes abaixo."
+        ).strip()
+        await ticket_channel.send(
+            content=intro,
+            embed=embed,
+            view=GodHandTrialTicketView(self),
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+        )
+
+        await interaction.followup.send(
+            f"Sua prova God Hand foi criada em {ticket_channel.mention}.",
+            ephemeral=True,
+        )
+
     async def claim_grade_challenge_from_interaction(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         channel = interaction.channel
@@ -4882,6 +5193,40 @@ class ClanBot(commands.Bot):
         await interaction.response.send_message(f"Arbitragem assumida por {member.mention}.", ephemeral=True)
         await channel.send(f"{member.mention} assumiu a arbitragem deste desafio.")
 
+    async def claim_god_hand_trial_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket da prova God Hand.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem assumir a prova God Hand.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "god_hand_trial":
+            await interaction.response.send_message("Esse canal nao e um ticket da prova God Hand.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Essa prova ja foi assumida por outro arbitro.", ephemeral=True)
+            return
+
+        self.database.assign_ticket(channel.id, assigned_to_id=member.id, assigned_to_tag=str(member))
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="god_hand_trial_claimed",
+            details=None,
+        )
+        await interaction.response.send_message(f"Arbitragem assumida por {member.mention}.", ephemeral=True)
+        await channel.send(f"{member.mention} assumiu a arbitragem desta prova God Hand.")
+
     async def release_grade_challenge_server_from_interaction(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         channel = interaction.channel
@@ -4916,6 +5261,185 @@ class ClanBot(commands.Bot):
         )
         await interaction.response.send_message("Server liberado e desafio pronto para acontecer.", ephemeral=True)
         await channel.send(f"{member.mention} liberou o server para o desafio.")
+
+    async def release_god_hand_trial_server_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket da prova God Hand.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem liberar o server.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "god_hand_trial":
+            await interaction.response.send_message("Esse canal nao e um ticket da prova God Hand.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Essa prova foi assumida por outro arbitro.", ephemeral=True)
+            return
+
+        self.database.update_ticket_status(channel.id, status="em_analise")
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="god_hand_trial_server_released",
+            details=None,
+        )
+        await interaction.response.send_message("Server liberado e prova pronta para o FT5 atual.", ephemeral=True)
+        await channel.send(f"{member.mention} liberou o server para a prova God Hand.")
+
+    async def resolve_god_hand_trial_round_from_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        challenger_won: bool,
+    ) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket da prova God Hand.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem registrar o FT5.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "god_hand_trial":
+            await interaction.response.send_message("Esse canal nao e um ticket da prova God Hand.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Essa prova foi assumida por outro arbitro.", ephemeral=True)
+            return
+
+        trial = self.database.get_god_hand_trial_by_ticket(ticket["id"])
+        if trial is None:
+            await interaction.response.send_message("Nao encontrei o registro dessa prova God Hand.", ephemeral=True)
+            return
+        if trial["status"] in {"aprovado", "falhou", "fechado", "cancelado"}:
+            await interaction.response.send_message("Essa prova ja foi finalizada.", ephemeral=True)
+            return
+
+        current_opponent = self.database.get_current_god_hand_trial_opponent(trial["id"])
+        if current_opponent is None:
+            await interaction.response.send_message("Nao ha FT5 pendente para registrar nessa prova.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        self.database.record_god_hand_trial_round(
+            trial["id"],
+            opponent_id=current_opponent["opponent_id"],
+            challenger_won=challenger_won,
+        )
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="god_hand_trial_round_won" if challenger_won else "god_hand_trial_round_lost",
+            details=current_opponent["opponent_tag"],
+        )
+
+        trial = self.database.get_god_hand_trial(trial["id"]) or trial
+        opponents = self.database.list_god_hand_trial_opponents(trial["id"])
+        challenger = guild.get_member(trial["challenger_id"])
+        opponent_member = guild.get_member(current_opponent["opponent_id"])
+        challenger_text = challenger.mention if challenger else trial["challenger_tag"]
+        opponent_text = opponent_member.mention if opponent_member else current_opponent["opponent_tag"]
+
+        if challenger_won and int(trial["wins_completed"]) >= int(trial["total_opponents"]):
+            self.database.resolve_god_hand_trial(trial["id"], status="aprovado")
+            self.database.update_ticket_status(channel.id, status="resolvido")
+            self.database.log_ticket_event(
+                ticket_id=ticket["id"],
+                guild_id=guild.id,
+                channel_id=channel.id,
+                actor_id=member.id,
+                actor_tag=str(member),
+                event_type="god_hand_trial_passed",
+                details=None,
+            )
+            final_trial = self.database.get_god_hand_trial(trial["id"]) or trial
+            final_opponents = self.database.list_god_hand_trial_opponents(trial["id"])
+            result_embed = self.build_god_hand_trial_embed(guild, final_trial, final_opponents)
+            result_embed.title = "Prova God Hand concluida"
+            result_embed.color = discord.Color.green()
+            result_embed.add_field(
+                name="Resultado final",
+                value=f"{challenger_text} venceu {opponent_text} e concluiu todos os FT5. Agora esta apto a desafiar a God Hand.",
+                inline=False,
+            )
+            god_hand_role = self.get_god_hand_role(guild)
+            result_content = god_hand_role.mention if god_hand_role is not None else None
+            await channel.send(
+                content=result_content,
+                embed=result_embed,
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
+            await self.award_participation_points(
+                member,
+                category="arbitragem",
+                reason=f"Finalizou a prova God Hand de {challenger.display_name if challenger else trial['challenger_tag']}.",
+            )
+            await interaction.followup.send("FT5 registrado e prova God Hand concluida com sucesso.", ephemeral=True)
+            return
+
+        if challenger_won:
+            next_opponent = self.database.get_current_god_hand_trial_opponent(trial["id"])
+            progress_embed = self.build_god_hand_trial_embed(guild, trial, opponents)
+            next_text = (
+                next_opponent["opponent_tag"]
+                if next_opponent is not None and guild.get_member(next_opponent["opponent_id"]) is None
+                else guild.get_member(next_opponent["opponent_id"]).mention
+                if next_opponent is not None
+                else "nenhum"
+            )
+            await channel.send(
+                f"{challenger_text} venceu o FT5 atual contra {opponent_text}. Proximo adversario: {next_text}.",
+                embed=progress_embed,
+            )
+            await interaction.followup.send("FT5 registrado com vitoria do desafiante.", ephemeral=True)
+            return
+
+        self.database.resolve_god_hand_trial(trial["id"], status="falhou")
+        self.database.update_ticket_status(channel.id, status="resolvido")
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="god_hand_trial_failed",
+            details=current_opponent["opponent_tag"],
+        )
+        final_trial = self.database.get_god_hand_trial(trial["id"]) or trial
+        final_opponents = self.database.list_god_hand_trial_opponents(trial["id"])
+        result_embed = self.build_god_hand_trial_embed(guild, final_trial, final_opponents)
+        result_embed.title = "Prova God Hand encerrada"
+        result_embed.color = discord.Color.red()
+        result_embed.add_field(
+            name="Resultado final",
+            value=f"{opponent_text} venceu o FT5 atual. A prova foi encerrada e o desafiante precisara abrir uma nova tentativa no futuro.",
+            inline=False,
+        )
+        await channel.send(embed=result_embed)
+        await self.award_participation_points(
+            member,
+            category="arbitragem",
+            reason=f"Finalizou a prova God Hand de {challenger.display_name if challenger else trial['challenger_tag']}.",
+        )
+        await interaction.followup.send("FT5 registrado e prova God Hand encerrada.", ephemeral=True)
 
     async def resolve_grade_challenge_from_interaction(
         self,
@@ -5311,6 +5835,8 @@ class ClanBot(commands.Bot):
             closed_by_tag=closed_by_tag,
             transcript_path=str(transcript_path),
         )
+        if ticket["ticket_type"] == "god_hand_trial":
+            self.database.close_god_hand_trial(ticket["id"])
         self.database.log_ticket_event(
             ticket_id=ticket["id"],
             guild_id=guild.id,

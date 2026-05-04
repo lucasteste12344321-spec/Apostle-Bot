@@ -70,10 +70,14 @@ class Settings:
     evaluator_role_id: int | None
     referee_role_id: int | None
     referee_role_name: str
+    god_hand_role_id: int | None
+    god_hand_role_name: str
     grade_role_ids: tuple[int, ...]
     grade_role_labels: tuple[str, ...]
     grade_subtier_role_ids: tuple[int, ...]
     grade_subtier_labels: tuple[str, ...]
+    god_hand_trial_grade_label: str
+    god_hand_trial_subtier_label: str
     database_path: Path
     bot_log_path: Path
     data_dir: Path
@@ -117,6 +121,8 @@ class Settings:
             evaluator_role_id=_int_with_default("EVALUATOR_ROLE_ID", 1467266953935585442),
             referee_role_id=_optional_int("REFEREE_ROLE_ID"),
             referee_role_name=os.getenv("REFEREE_ROLE_NAME", "arbitro").strip() or "arbitro",
+            god_hand_role_id=_optional_int("GOD_HAND_ROLE_ID"),
+            god_hand_role_name=os.getenv("GOD_HAND_ROLE_NAME", "God Hand").strip() or "God Hand",
             grade_role_ids=_parse_int_list(
                 os.getenv(
                     "GRADE_ROLE_IDS",
@@ -132,6 +138,8 @@ class Settings:
             ),
             grade_subtier_role_ids=_parse_int_list(os.getenv("GRADE_SUBTIER_ROLE_IDS", "")),
             grade_subtier_labels=_parse_str_list(os.getenv("GRADE_SUBTIER_LABELS", "Low,Mid,High")),
+            god_hand_trial_grade_label=os.getenv("GOD_HAND_TRIAL_GRADE_LABEL", "Grade 1").strip() or "Grade 1",
+            god_hand_trial_subtier_label=os.getenv("GOD_HAND_TRIAL_SUBTIER_LABEL", "High").strip() or "High",
             database_path=database_path,
             bot_log_path=bot_log_path,
             data_dir=data_dir,

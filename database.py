@@ -379,6 +379,43 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_grade_challenges_member
             ON grade_challenges (guild_id, challenger_id, challenged_id, created_at);
 
+            CREATE TABLE IF NOT EXISTS god_hand_trials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                ticket_id INTEGER,
+                challenger_id INTEGER NOT NULL,
+                challenger_tag TEXT NOT NULL,
+                challenger_grade_role_id INTEGER,
+                challenger_grade_role_name TEXT,
+                challenger_subtier_role_id INTEGER,
+                challenger_subtier_role_name TEXT,
+                total_opponents INTEGER NOT NULL DEFAULT 0,
+                wins_completed INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'aberto',
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                FOREIGN KEY (ticket_id) REFERENCES tickets (id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_god_hand_trials_member
+            ON god_hand_trials (guild_id, challenger_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS god_hand_trial_opponents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trial_id INTEGER NOT NULL,
+                opponent_id INTEGER NOT NULL,
+                opponent_tag TEXT NOT NULL,
+                opponent_display_name TEXT,
+                sequence_index INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pendente',
+                completed_at TEXT,
+                UNIQUE(trial_id, opponent_id),
+                FOREIGN KEY (trial_id) REFERENCES god_hand_trials (id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_god_hand_trial_opponents_trial
+            ON god_hand_trial_opponents (trial_id, sequence_index);
+
             CREATE TABLE IF NOT EXISTS apostle_balances (
                 guild_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
@@ -2616,3 +2653,195 @@ class Database:
             (result, "resolvido", utcnow_iso(), ticket_id),
         )
         self.connection.commit()
+
+    def create_god_hand_trial(
+        self,
+        *,
+        guild_id: int,
+        ticket_id: int | None,
+        challenger_id: int,
+        challenger_tag: str,
+        challenger_grade_role_id: int | None,
+        challenger_grade_role_name: str | None,
+        challenger_subtier_role_id: int | None,
+        challenger_subtier_role_name: str | None,
+        total_opponents: int,
+    ) -> int:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO god_hand_trials (
+                guild_id,
+                ticket_id,
+                challenger_id,
+                challenger_tag,
+                challenger_grade_role_id,
+                challenger_grade_role_name,
+                challenger_subtier_role_id,
+                challenger_subtier_role_name,
+                total_opponents,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                ticket_id,
+                challenger_id,
+                challenger_tag,
+                challenger_grade_role_id,
+                challenger_grade_role_name,
+                challenger_subtier_role_id,
+                challenger_subtier_role_name,
+                total_opponents,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def add_god_hand_trial_opponents(
+        self,
+        trial_id: int,
+        opponents: list[dict[str, Any]],
+    ) -> None:
+        self.connection.executemany(
+            """
+            INSERT INTO god_hand_trial_opponents (
+                trial_id,
+                opponent_id,
+                opponent_tag,
+                opponent_display_name,
+                sequence_index
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    trial_id,
+                    opponent["opponent_id"],
+                    opponent["opponent_tag"],
+                    opponent.get("opponent_display_name"),
+                    opponent["sequence_index"],
+                )
+                for opponent in opponents
+            ],
+        )
+        self.connection.commit()
+
+    def get_god_hand_trial(self, trial_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM god_hand_trials WHERE id = ?",
+            (trial_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_god_hand_trial_by_ticket(self, ticket_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM god_hand_trials WHERE ticket_id = ? ORDER BY id DESC LIMIT 1",
+            (ticket_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_god_hand_trial_opponents(self, trial_id: int) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM god_hand_trial_opponents
+            WHERE trial_id = ?
+            ORDER BY sequence_index ASC, id ASC
+            """,
+            (trial_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_current_god_hand_trial_opponent(self, trial_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM god_hand_trial_opponents
+            WHERE trial_id = ? AND status = 'pendente'
+            ORDER BY sequence_index ASC, id ASC
+            LIMIT 1
+            """,
+            (trial_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def record_god_hand_trial_round(self, trial_id: int, *, opponent_id: int, challenger_won: bool) -> None:
+        now = utcnow_iso()
+        opponent_status = "vencido" if challenger_won else "venceu"
+        self.connection.execute(
+            """
+            UPDATE god_hand_trial_opponents
+            SET status = ?, completed_at = ?
+            WHERE trial_id = ? AND opponent_id = ?
+            """,
+            (opponent_status, now, trial_id, opponent_id),
+        )
+        if challenger_won:
+            self.connection.execute(
+                """
+                UPDATE god_hand_trials
+                SET wins_completed = wins_completed + 1
+                WHERE id = ?
+                """,
+                (trial_id,),
+            )
+        self.connection.commit()
+
+    def resolve_god_hand_trial(self, trial_id: int, *, status: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE god_hand_trials
+            SET status = ?, resolved_at = ?
+            WHERE id = ?
+            """,
+            (status, utcnow_iso(), trial_id),
+        )
+        self.connection.commit()
+
+    def close_god_hand_trial(self, ticket_id: int, *, status: str = "fechado") -> None:
+        self.connection.execute(
+            """
+            UPDATE god_hand_trials
+            SET status = CASE
+                WHEN status IN ('aprovado', 'falhou', 'fechado', 'cancelado') THEN status
+                ELSE ?
+            END,
+                resolved_at = CASE
+                    WHEN status IN ('aprovado', 'falhou', 'fechado', 'cancelado') THEN resolved_at
+                    ELSE ?
+                END
+            WHERE ticket_id = ?
+            """,
+            (status, utcnow_iso(), ticket_id),
+        )
+        self.connection.commit()
+
+    def get_active_god_hand_trial_for_challenger(self, guild_id: int, challenger_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT ght.*, t.channel_id
+            FROM god_hand_trials ght
+            LEFT JOIN tickets t ON t.id = ght.ticket_id
+            WHERE ght.guild_id = ?
+              AND ght.challenger_id = ?
+              AND ght.status NOT IN ('aprovado', 'falhou', 'fechado', 'cancelado')
+              AND (t.status IS NULL OR t.status NOT IN ('resolvido', 'fechado'))
+            ORDER BY ght.created_at DESC
+            LIMIT 1
+            """,
+            (guild_id, challenger_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def has_passed_god_hand_trial(self, guild_id: int, challenger_id: int) -> bool:
+        row = self.connection.execute(
+            """
+            SELECT id
+            FROM god_hand_trials
+            WHERE guild_id = ? AND challenger_id = ? AND status = 'aprovado'
+            ORDER BY COALESCE(resolved_at, created_at) DESC
+            LIMIT 1
+            """,
+            (guild_id, challenger_id),
+        ).fetchone()
+        return row is not None
