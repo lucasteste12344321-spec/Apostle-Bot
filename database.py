@@ -204,6 +204,9 @@ class Database:
                 tournament_min_points INTEGER NOT NULL DEFAULT 0,
                 automod_enabled INTEGER NOT NULL DEFAULT 1,
                 anti_raid_enabled INTEGER NOT NULL DEFAULT 1,
+                god_hand_role_id INTEGER,
+                god_hand_trial_grade_role_id INTEGER,
+                god_hand_trial_subtier_role_id INTEGER,
                 updated_at TEXT NOT NULL
             );
 
@@ -416,6 +419,69 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_god_hand_trial_opponents_trial
             ON god_hand_trial_opponents (trial_id, sequence_index);
 
+            CREATE TABLE IF NOT EXISTS god_hand_final_challenges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                ticket_id INTEGER,
+                challenger_id INTEGER NOT NULL,
+                challenger_tag TEXT NOT NULL,
+                defender_id INTEGER NOT NULL,
+                defender_tag TEXT NOT NULL,
+                referee_id INTEGER,
+                referee_tag TEXT,
+                status TEXT NOT NULL DEFAULT 'aberto',
+                result TEXT,
+                server_released_at TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                FOREIGN KEY (ticket_id) REFERENCES tickets (id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_god_hand_final_challenges_member
+            ON god_hand_final_challenges (guild_id, challenger_id, defender_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS competitive_profiles (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_tag TEXT NOT NULL,
+                current_grade_role_id INTEGER,
+                current_grade_role_name TEXT,
+                grade_tests_completed INTEGER NOT NULL DEFAULT 0,
+                grade_challenge_wins INTEGER NOT NULL DEFAULT 0,
+                grade_challenge_losses INTEGER NOT NULL DEFAULT 0,
+                god_hand_trial_attempts INTEGER NOT NULL DEFAULT 0,
+                god_hand_trial_passes INTEGER NOT NULL DEFAULT 0,
+                god_hand_final_wins INTEGER NOT NULL DEFAULT 0,
+                god_hand_final_losses INTEGER NOT NULL DEFAULT 0,
+                season_points INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS competitive_season_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                season_name TEXT NOT NULL,
+                closed_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_tag TEXT NOT NULL,
+                current_grade_role_id INTEGER,
+                current_grade_role_name TEXT,
+                grade_tests_completed INTEGER NOT NULL DEFAULT 0,
+                grade_challenge_wins INTEGER NOT NULL DEFAULT 0,
+                grade_challenge_losses INTEGER NOT NULL DEFAULT 0,
+                god_hand_trial_attempts INTEGER NOT NULL DEFAULT 0,
+                god_hand_trial_passes INTEGER NOT NULL DEFAULT 0,
+                god_hand_final_wins INTEGER NOT NULL DEFAULT 0,
+                god_hand_final_losses INTEGER NOT NULL DEFAULT 0,
+                season_points INTEGER NOT NULL DEFAULT 0,
+                season_rank INTEGER,
+                archived_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_competitive_season_snapshots_guild
+            ON competitive_season_snapshots (guild_id, season_name, season_rank);
+
             CREATE TABLE IF NOT EXISTS apostle_balances (
                 guild_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
@@ -507,6 +573,9 @@ class Database:
         self._ensure_column("guild_settings", "evaluation_channel_id", "INTEGER")
         self._ensure_column("guild_settings", "watch_channel_id", "INTEGER")
         self._ensure_column("guild_feature_settings", "tournament_min_points", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("guild_feature_settings", "god_hand_role_id", "INTEGER")
+        self._ensure_column("guild_feature_settings", "god_hand_trial_grade_role_id", "INTEGER")
+        self._ensure_column("guild_feature_settings", "god_hand_trial_subtier_role_id", "INTEGER")
         self._ensure_column("grade_assessments", "assigned_subtier_role_id", "INTEGER")
         self._ensure_column("grade_assessments", "assigned_subtier_role_name", "TEXT")
         self._ensure_column("grade_profiles", "manual_test_unlock_at", "TEXT")
@@ -1013,6 +1082,9 @@ class Database:
             "tournament_min_points": 0,
             "automod_enabled": 1,
             "anti_raid_enabled": 1,
+            "god_hand_role_id": None,
+            "god_hand_trial_grade_role_id": None,
+            "god_hand_trial_subtier_role_id": None,
             "updated_at": utcnow_iso(),
         }
         current.update(fields)
@@ -1028,8 +1100,11 @@ class Database:
                 tournament_min_points,
                 automod_enabled,
                 anti_raid_enabled,
+                god_hand_role_id,
+                god_hand_trial_grade_role_id,
+                god_hand_trial_subtier_role_id,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id) DO UPDATE SET
                 help_notify_role_id = excluded.help_notify_role_id,
                 ticket_panel_channel_id = excluded.ticket_panel_channel_id,
@@ -1037,6 +1112,9 @@ class Database:
                 tournament_min_points = excluded.tournament_min_points,
                 automod_enabled = excluded.automod_enabled,
                 anti_raid_enabled = excluded.anti_raid_enabled,
+                god_hand_role_id = excluded.god_hand_role_id,
+                god_hand_trial_grade_role_id = excluded.god_hand_trial_grade_role_id,
+                god_hand_trial_subtier_role_id = excluded.god_hand_trial_subtier_role_id,
                 updated_at = excluded.updated_at
             """,
             (
@@ -1047,6 +1125,9 @@ class Database:
                 current["tournament_min_points"],
                 current["automod_enabled"],
                 current["anti_raid_enabled"],
+                current["god_hand_role_id"],
+                current["god_hand_trial_grade_role_id"],
+                current["god_hand_trial_subtier_role_id"],
                 current["updated_at"],
             ),
         )
@@ -2266,6 +2347,22 @@ class Database:
             "SELECT COUNT(*) FROM automod_events WHERE guild_id = ?",
             (guild_id,),
         ).fetchone()[0]
+        god_hand_trials = self.connection.execute(
+            "SELECT COUNT(*) FROM god_hand_trials WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        god_hand_finals = self.connection.execute(
+            "SELECT COUNT(*) FROM god_hand_final_challenges WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        competitive_profiles = self.connection.execute(
+            "SELECT COUNT(*) FROM competitive_profiles WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        archived_seasons = self.connection.execute(
+            "SELECT COUNT(DISTINCT season_name) FROM competitive_season_snapshots WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
         return {
             "messages": messages,
             "reports": reports,
@@ -2273,6 +2370,10 @@ class Database:
             "moderation_actions": moderation,
             "blacklist_entries": blacklist,
             "automod_events": automod,
+            "god_hand_trials": god_hand_trials,
+            "god_hand_finals": god_hand_finals,
+            "competitive_profiles": competitive_profiles,
+            "archived_seasons": archived_seasons,
         }
 
     def get_grade_profile(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
@@ -2614,6 +2715,31 @@ class Database:
         self.connection.commit()
         return int(cursor.lastrowid)
 
+    def list_recent_grade_challenges(
+        self,
+        guild_id: int,
+        *,
+        user_id: int | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        conditions = ["guild_id = ?"]
+        params: list[Any] = [guild_id]
+        if user_id is not None:
+            conditions.append("(challenger_id = ? OR challenged_id = ?)")
+            params.extend([user_id, user_id])
+        params.append(limit)
+        rows = self.connection.execute(
+            f"""
+            SELECT *
+            FROM grade_challenges
+            WHERE {' AND '.join(conditions)}
+            ORDER BY COALESCE(resolved_at, created_at) DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_grade_challenge_by_ticket(self, ticket_id: int) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT * FROM grade_challenges WHERE ticket_id = ? ORDER BY id DESC LIMIT 1",
@@ -2845,3 +2971,576 @@ class Database:
             (guild_id, challenger_id),
         ).fetchone()
         return row is not None
+
+    def get_latest_passed_god_hand_trial(self, guild_id: int, challenger_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM god_hand_trials
+            WHERE guild_id = ? AND challenger_id = ? AND status = 'aprovado'
+            ORDER BY COALESCE(resolved_at, created_at) DESC
+            LIMIT 1
+            """,
+            (guild_id, challenger_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_recent_god_hand_trials(
+        self,
+        guild_id: int,
+        *,
+        challenger_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        conditions = ["guild_id = ?"]
+        params: list[Any] = [guild_id]
+        if challenger_id is not None:
+            conditions.append("challenger_id = ?")
+            params.append(challenger_id)
+        params.append(limit)
+        rows = self.connection.execute(
+            f"""
+            SELECT *
+            FROM god_hand_trials
+            WHERE {' AND '.join(conditions)}
+            ORDER BY COALESCE(resolved_at, created_at) DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_god_hand_final_challenge(
+        self,
+        *,
+        guild_id: int,
+        ticket_id: int | None,
+        challenger_id: int,
+        challenger_tag: str,
+        defender_id: int,
+        defender_tag: str,
+    ) -> int:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO god_hand_final_challenges (
+                guild_id,
+                ticket_id,
+                challenger_id,
+                challenger_tag,
+                defender_id,
+                defender_tag,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                ticket_id,
+                challenger_id,
+                challenger_tag,
+                defender_id,
+                defender_tag,
+                utcnow_iso(),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def get_god_hand_final_challenge_by_ticket(self, ticket_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM god_hand_final_challenges WHERE ticket_id = ? ORDER BY id DESC LIMIT 1",
+            (ticket_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def assign_god_hand_final_referee(self, ticket_id: int, *, referee_id: int, referee_tag: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE god_hand_final_challenges
+            SET referee_id = ?, referee_tag = ?, status = ?
+            WHERE ticket_id = ?
+            """,
+            (referee_id, referee_tag, "arbitragem_assumida", ticket_id),
+        )
+        self.connection.commit()
+
+    def mark_god_hand_final_server_released(self, ticket_id: int) -> None:
+        self.connection.execute(
+            """
+            UPDATE god_hand_final_challenges
+            SET server_released_at = ?, status = ?
+            WHERE ticket_id = ?
+            """,
+            (utcnow_iso(), "server_liberado", ticket_id),
+        )
+        self.connection.commit()
+
+    def resolve_god_hand_final_challenge(self, ticket_id: int, *, result: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE god_hand_final_challenges
+            SET result = ?, status = ?, resolved_at = ?
+            WHERE ticket_id = ?
+            """,
+            (result, "resolvido", utcnow_iso(), ticket_id),
+        )
+        self.connection.commit()
+
+    def close_god_hand_final_challenge(self, ticket_id: int, *, status: str = "fechado") -> None:
+        self.connection.execute(
+            """
+            UPDATE god_hand_final_challenges
+            SET status = CASE
+                WHEN status IN ('aprovado', 'falhou', 'fechado', 'cancelado', 'resolvido') THEN status
+                ELSE ?
+            END,
+                resolved_at = CASE
+                    WHEN status IN ('aprovado', 'falhou', 'fechado', 'cancelado', 'resolvido') THEN resolved_at
+                    ELSE ?
+                END
+            WHERE ticket_id = ?
+            """,
+            (status, utcnow_iso(), ticket_id),
+        )
+        self.connection.commit()
+
+    def get_active_god_hand_final_for_challenger(self, guild_id: int, challenger_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT ghf.*, t.channel_id
+            FROM god_hand_final_challenges ghf
+            LEFT JOIN tickets t ON t.id = ghf.ticket_id
+            WHERE ghf.guild_id = ?
+              AND ghf.challenger_id = ?
+              AND ghf.status NOT IN ('aprovado', 'falhou', 'fechado', 'cancelado', 'resolvido')
+              AND (t.status IS NULL OR t.status NOT IN ('resolvido', 'fechado'))
+            ORDER BY ghf.created_at DESC
+            LIMIT 1
+            """,
+            (guild_id, challenger_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_active_god_hand_final_for_defender(self, guild_id: int, defender_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT ghf.*, t.channel_id
+            FROM god_hand_final_challenges ghf
+            LEFT JOIN tickets t ON t.id = ghf.ticket_id
+            WHERE ghf.guild_id = ?
+              AND ghf.defender_id = ?
+              AND ghf.status NOT IN ('aprovado', 'falhou', 'fechado', 'cancelado', 'resolvido')
+              AND (t.status IS NULL OR t.status NOT IN ('resolvido', 'fechado'))
+            ORDER BY ghf.created_at DESC
+            LIMIT 1
+            """,
+            (guild_id, defender_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_recent_god_hand_final_challenges(
+        self,
+        guild_id: int,
+        *,
+        user_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        conditions = ["guild_id = ?"]
+        params: list[Any] = [guild_id]
+        if user_id is not None:
+            conditions.append("(challenger_id = ? OR defender_id = ?)")
+            params.extend([user_id, user_id])
+        params.append(limit)
+        rows = self.connection.execute(
+            f"""
+            SELECT *
+            FROM god_hand_final_challenges
+            WHERE {' AND '.join(conditions)}
+            ORDER BY COALESCE(resolved_at, created_at) DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_competitive_profile(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM competitive_profiles WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_competitive_profile(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        current_grade_role_id: int | None,
+        current_grade_role_name: str | None,
+        grade_tests_completed: int | None = None,
+        grade_challenge_wins: int | None = None,
+        grade_challenge_losses: int | None = None,
+        god_hand_trial_attempts: int | None = None,
+        god_hand_trial_passes: int | None = None,
+        god_hand_final_wins: int | None = None,
+        god_hand_final_losses: int | None = None,
+        season_points: int | None = None,
+    ) -> None:
+        current = self.get_competitive_profile(guild_id, user_id) or {
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "user_tag": user_tag,
+            "current_grade_role_id": current_grade_role_id,
+            "current_grade_role_name": current_grade_role_name,
+            "grade_tests_completed": 0,
+            "grade_challenge_wins": 0,
+            "grade_challenge_losses": 0,
+            "god_hand_trial_attempts": 0,
+            "god_hand_trial_passes": 0,
+            "god_hand_final_wins": 0,
+            "god_hand_final_losses": 0,
+            "season_points": 0,
+            "updated_at": utcnow_iso(),
+        }
+        current["user_tag"] = user_tag
+        current["current_grade_role_id"] = current_grade_role_id
+        current["current_grade_role_name"] = current_grade_role_name
+        if grade_tests_completed is not None:
+            current["grade_tests_completed"] = grade_tests_completed
+        if grade_challenge_wins is not None:
+            current["grade_challenge_wins"] = grade_challenge_wins
+        if grade_challenge_losses is not None:
+            current["grade_challenge_losses"] = grade_challenge_losses
+        if god_hand_trial_attempts is not None:
+            current["god_hand_trial_attempts"] = god_hand_trial_attempts
+        if god_hand_trial_passes is not None:
+            current["god_hand_trial_passes"] = god_hand_trial_passes
+        if god_hand_final_wins is not None:
+            current["god_hand_final_wins"] = god_hand_final_wins
+        if god_hand_final_losses is not None:
+            current["god_hand_final_losses"] = god_hand_final_losses
+        if season_points is not None:
+            current["season_points"] = season_points
+        current["updated_at"] = utcnow_iso()
+
+        self.connection.execute(
+            """
+            INSERT INTO competitive_profiles (
+                guild_id,
+                user_id,
+                user_tag,
+                current_grade_role_id,
+                current_grade_role_name,
+                grade_tests_completed,
+                grade_challenge_wins,
+                grade_challenge_losses,
+                god_hand_trial_attempts,
+                god_hand_trial_passes,
+                god_hand_final_wins,
+                god_hand_final_losses,
+                season_points,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                user_tag = excluded.user_tag,
+                current_grade_role_id = excluded.current_grade_role_id,
+                current_grade_role_name = excluded.current_grade_role_name,
+                grade_tests_completed = excluded.grade_tests_completed,
+                grade_challenge_wins = excluded.grade_challenge_wins,
+                grade_challenge_losses = excluded.grade_challenge_losses,
+                god_hand_trial_attempts = excluded.god_hand_trial_attempts,
+                god_hand_trial_passes = excluded.god_hand_trial_passes,
+                god_hand_final_wins = excluded.god_hand_final_wins,
+                god_hand_final_losses = excluded.god_hand_final_losses,
+                season_points = excluded.season_points,
+                updated_at = excluded.updated_at
+            """,
+            (
+                current["guild_id"],
+                current["user_id"],
+                current["user_tag"],
+                current["current_grade_role_id"],
+                current["current_grade_role_name"],
+                current["grade_tests_completed"],
+                current["grade_challenge_wins"],
+                current["grade_challenge_losses"],
+                current["god_hand_trial_attempts"],
+                current["god_hand_trial_passes"],
+                current["god_hand_final_wins"],
+                current["god_hand_final_losses"],
+                current["season_points"],
+                current["updated_at"],
+            ),
+        )
+        self.connection.commit()
+
+    def adjust_competitive_profile(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        user_tag: str,
+        current_grade_role_id: int | None,
+        current_grade_role_name: str | None,
+        grade_tests_completed_delta: int = 0,
+        grade_challenge_wins_delta: int = 0,
+        grade_challenge_losses_delta: int = 0,
+        god_hand_trial_attempts_delta: int = 0,
+        god_hand_trial_passes_delta: int = 0,
+        god_hand_final_wins_delta: int = 0,
+        god_hand_final_losses_delta: int = 0,
+        season_points_delta: int = 0,
+    ) -> dict[str, Any]:
+        current = self.get_competitive_profile(guild_id, user_id) or {
+            "grade_tests_completed": 0,
+            "grade_challenge_wins": 0,
+            "grade_challenge_losses": 0,
+            "god_hand_trial_attempts": 0,
+            "god_hand_trial_passes": 0,
+            "god_hand_final_wins": 0,
+            "god_hand_final_losses": 0,
+            "season_points": 0,
+        }
+        updated = {
+            "grade_tests_completed": max(0, int(current.get("grade_tests_completed", 0)) + grade_tests_completed_delta),
+            "grade_challenge_wins": max(0, int(current.get("grade_challenge_wins", 0)) + grade_challenge_wins_delta),
+            "grade_challenge_losses": max(0, int(current.get("grade_challenge_losses", 0)) + grade_challenge_losses_delta),
+            "god_hand_trial_attempts": max(0, int(current.get("god_hand_trial_attempts", 0)) + god_hand_trial_attempts_delta),
+            "god_hand_trial_passes": max(0, int(current.get("god_hand_trial_passes", 0)) + god_hand_trial_passes_delta),
+            "god_hand_final_wins": max(0, int(current.get("god_hand_final_wins", 0)) + god_hand_final_wins_delta),
+            "god_hand_final_losses": max(0, int(current.get("god_hand_final_losses", 0)) + god_hand_final_losses_delta),
+            "season_points": max(0, int(current.get("season_points", 0)) + season_points_delta),
+        }
+        self.upsert_competitive_profile(
+            guild_id=guild_id,
+            user_id=user_id,
+            user_tag=user_tag,
+            current_grade_role_id=current_grade_role_id,
+            current_grade_role_name=current_grade_role_name,
+            **updated,
+        )
+        return self.get_competitive_profile(guild_id, user_id) or {
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "user_tag": user_tag,
+            "current_grade_role_id": current_grade_role_id,
+            "current_grade_role_name": current_grade_role_name,
+            **updated,
+            "updated_at": utcnow_iso(),
+        }
+
+    def list_competitive_leaderboard(self, guild_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM competitive_profiles
+            WHERE guild_id = ?
+            ORDER BY season_points DESC,
+                     god_hand_final_wins DESC,
+                     god_hand_trial_passes DESC,
+                     grade_challenge_wins DESC,
+                     grade_tests_completed DESC,
+                     user_tag COLLATE NOCASE ASC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def archive_current_competitive_season(self, guild_id: int, *, season_name: str) -> int:
+        current_rows = self.list_competitive_leaderboard(guild_id, limit=10000)
+        if not current_rows:
+            return 0
+
+        now = utcnow_iso()
+        self.connection.executemany(
+            """
+            INSERT INTO competitive_season_snapshots (
+                guild_id,
+                season_name,
+                closed_at,
+                user_id,
+                user_tag,
+                current_grade_role_id,
+                current_grade_role_name,
+                grade_tests_completed,
+                grade_challenge_wins,
+                grade_challenge_losses,
+                god_hand_trial_attempts,
+                god_hand_trial_passes,
+                god_hand_final_wins,
+                god_hand_final_losses,
+                season_points,
+                season_rank,
+                archived_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    guild_id,
+                    season_name,
+                    now,
+                    row["user_id"],
+                    row["user_tag"],
+                    row.get("current_grade_role_id"),
+                    row.get("current_grade_role_name"),
+                    row.get("grade_tests_completed", 0),
+                    row.get("grade_challenge_wins", 0),
+                    row.get("grade_challenge_losses", 0),
+                    row.get("god_hand_trial_attempts", 0),
+                    row.get("god_hand_trial_passes", 0),
+                    row.get("god_hand_final_wins", 0),
+                    row.get("god_hand_final_losses", 0),
+                    row.get("season_points", 0),
+                    index,
+                    now,
+                )
+                for index, row in enumerate(current_rows, start=1)
+            ],
+        )
+        self.connection.execute(
+            """
+            UPDATE competitive_profiles
+            SET grade_tests_completed = 0,
+                grade_challenge_wins = 0,
+                grade_challenge_losses = 0,
+                god_hand_trial_attempts = 0,
+                god_hand_trial_passes = 0,
+                god_hand_final_wins = 0,
+                god_hand_final_losses = 0,
+                season_points = 0,
+                updated_at = ?
+            WHERE guild_id = ?
+            """,
+            (now, guild_id),
+        )
+        self.connection.commit()
+        return len(current_rows)
+
+    def list_competitive_season_summaries(self, guild_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT
+                season_name,
+                MAX(closed_at) AS closed_at,
+                COUNT(*) AS total_members,
+                MAX(CASE WHEN season_rank = 1 THEN user_tag END) AS champion_tag,
+                MAX(CASE WHEN season_rank = 1 THEN season_points END) AS champion_points
+            FROM competitive_season_snapshots
+            WHERE guild_id = ?
+            GROUP BY season_name
+            ORDER BY MAX(closed_at) DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_competitive_season_snapshot(
+        self,
+        guild_id: int,
+        *,
+        season_name: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM competitive_season_snapshots
+            WHERE guild_id = ? AND season_name = ?
+            ORDER BY COALESCE(season_rank, 999999) ASC, season_points DESC, user_tag COLLATE NOCASE ASC
+            LIMIT ?
+            """,
+            (guild_id, season_name, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_competitive_hall_of_fame(self, guild_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            WITH combined AS (
+                SELECT
+                    user_id,
+                    user_tag,
+                    grade_tests_completed,
+                    grade_challenge_wins,
+                    grade_challenge_losses,
+                    god_hand_trial_attempts,
+                    god_hand_trial_passes,
+                    god_hand_final_wins,
+                    god_hand_final_losses,
+                    season_points
+                FROM competitive_profiles
+                WHERE guild_id = ?
+                UNION ALL
+                SELECT
+                    user_id,
+                    user_tag,
+                    grade_tests_completed,
+                    grade_challenge_wins,
+                    grade_challenge_losses,
+                    god_hand_trial_attempts,
+                    god_hand_trial_passes,
+                    god_hand_final_wins,
+                    god_hand_final_losses,
+                    season_points
+                FROM competitive_season_snapshots
+                WHERE guild_id = ?
+            )
+            SELECT
+                user_id,
+                MAX(user_tag) AS user_tag,
+                SUM(grade_tests_completed) AS grade_tests_completed,
+                SUM(grade_challenge_wins) AS grade_challenge_wins,
+                SUM(grade_challenge_losses) AS grade_challenge_losses,
+                SUM(god_hand_trial_attempts) AS god_hand_trial_attempts,
+                SUM(god_hand_trial_passes) AS god_hand_trial_passes,
+                SUM(god_hand_final_wins) AS god_hand_final_wins,
+                SUM(god_hand_final_losses) AS god_hand_final_losses,
+                SUM(season_points) AS lifetime_points
+            FROM combined
+            GROUP BY user_id
+            ORDER BY god_hand_final_wins DESC,
+                     god_hand_trial_passes DESC,
+                     grade_challenge_wins DESC,
+                     lifetime_points DESC,
+                     user_tag COLLATE NOCASE ASC
+            LIMIT ?
+            """,
+            (guild_id, guild_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_competitive_overview(self, guild_id: int) -> dict[str, Any]:
+        participants = self.connection.execute(
+            "SELECT COUNT(*) FROM competitive_profiles WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        seasons_archived = self.connection.execute(
+            "SELECT COUNT(DISTINCT season_name) FROM competitive_season_snapshots WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        active_trials = self.connection.execute(
+            "SELECT COUNT(*) FROM god_hand_trials WHERE guild_id = ? AND status NOT IN ('aprovado', 'falhou', 'fechado', 'cancelado')",
+            (guild_id,),
+        ).fetchone()[0]
+        active_finals = self.connection.execute(
+            "SELECT COUNT(*) FROM god_hand_final_challenges WHERE guild_id = ? AND status NOT IN ('aprovado', 'falhou', 'fechado', 'cancelado', 'resolvido')",
+            (guild_id,),
+        ).fetchone()[0]
+        approved_trials = self.connection.execute(
+            "SELECT COUNT(*) FROM god_hand_trials WHERE guild_id = ? AND status = 'aprovado'",
+            (guild_id,),
+        ).fetchone()[0]
+        final_wins = self.connection.execute(
+            "SELECT COALESCE(SUM(god_hand_final_wins), 0) FROM competitive_profiles WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        return {
+            "participants": int(participants),
+            "seasons_archived": int(seasons_archived),
+            "active_trials": int(active_trials),
+            "active_finals": int(active_finals),
+            "approved_trials": int(approved_trials),
+            "god_hand_final_wins": int(final_wins or 0),
+        }

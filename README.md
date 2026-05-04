@@ -11,10 +11,12 @@ Bot de Discord em Python para:
 - abrir ticket de teste de grade com avaliador assumindo, notas e atribuicao de grade por botoes
 - abrir ticket de desafio de grade com arbitragem, liberacao do server, resultado e dodge
 - abrir prova God Hand para Grade 1 High com fila automatica de FT5 contra os outros elegiveis
+- abrir desafio final da God Hand contra um membro do cargo configurado
+- manter ranking competitivo sazonal, Hall da Fama e historico competitivo
 - arquivar avaliacoes finalizadas em um canal proprio com embeds mais bonitas
 - aplicar warn, timeout, kick, ban e blacklist
 - registrar presenca do cla, ranking de ajuda e historicos
-- rodar automod basico, anti-raid e dashboard web simples
+- rodar automod basico, anti-raid e dashboard web operacional/competitivo
 
 ## Requisitos
 
@@ -64,7 +66,7 @@ py main.py
 
 ## Deploy no Railway
 
-O projeto ja esta preparado para Railway com [.python-version](C:/Users/SPXBR33317/Desktop/bot%20Discor/.python-version) e [railway.json](C:/Users/SPXBR33317/Desktop/bot%20Discor/railway.json).
+O projeto ja esta preparado para Railway com [.python-version](.python-version) e [railway.json](railway.json).
 
 Passo a passo:
 
@@ -91,6 +93,7 @@ Observacoes importantes para Railway:
 Depois que o bot entrar no servidor:
 
 1. Use `/configurar_canais` para definir os canais de logs, reports, ajuda, avaliacoes e vigia.
+2. Use `/configurar_god_hand` para apontar o cargo da God Hand e, se quiser, trocar os cargos-base da prova.
 2. Use `/painel_ajuda` para criar o painel de status de ajuda.
 3. Use `/painel_tickets` para criar o painel de atendimento e denuncias.
 4. Use `/painel_grades` para criar o painel competitivo de grades.
@@ -111,6 +114,7 @@ No `/painel_grades`, os botoes atuais incluem:
 - `Pedir teste`
 - `Desafio de grade`
 - `Prova God Hand`
+- `Desafio God Hand`
 
 ## Comandos
 
@@ -119,6 +123,7 @@ No `/painel_grades`, os botoes atuais incluem:
 - `/configurar_titulos_apostolo`
 - `/configurar_notificacao_ajuda`
 - `/configurar_seguranca`
+- `/configurar_god_hand`
 - `/painel_ajuda`
 - `/painel_tickets`
 - `/painel_grades`
@@ -154,17 +159,22 @@ No `/painel_grades`, os botoes atuais incluem:
 - `/equipar_item`
 - `/desafiar_jogador`
 - `/historico_membro`
+- `/historico_competitivo`
 - `/historico_reports`
 - `/historico_grade`
 - `/historico_convites`
 - `/mensagem_apagada`
 - `/ranking_ajuda`
 - `/meu_status`
+- `/status_prova_god_hand`
 - `/estatisticas_tickets`
 - `/top_grades`
+- `/temporada_competitiva`
+- `/hall_da_fama_god_hand`
+- `/encerrar_temporada_competitiva`
 - `/exportar_dados`
 
-## Sistema de grade
+## Sistema de grade e God Hand
 
 O painel de grades agora inclui tres fluxos competitivos:
 
@@ -189,7 +199,7 @@ O painel de grades agora inclui tres fluxos competitivos:
   - com 3 dodges, o desafiado desce uma grade
 
 - `Prova God Hand`
-  - so abre para quem estiver no cargo configurado em `GOD_HAND_TRIAL_GRADE_LABEL` + `GOD_HAND_TRIAL_SUBTIER_LABEL`
+  - so abre para quem estiver no cargo configurado em `/configurar_god_hand` ou, se nada for salvo, no fallback `GOD_HAND_TRIAL_GRADE_LABEL` + `GOD_HAND_TRIAL_SUBTIER_LABEL`
   - o bot monta automaticamente a fila com os outros membros elegiveis
   - se `GOD_HAND_ROLE_ID` ou `GOD_HAND_ROLE_NAME` estiver configurado, esses membros ficam fora da fila
   - o ticket adiciona desafiante, fila elegivel e staff de arbitragem
@@ -197,16 +207,44 @@ O painel de grades agora inclui tres fluxos competitivos:
   - uma derrota encerra a prova
   - vencendo todos, o membro fica apto a desafiar a God Hand
 
+- `Desafio God Hand`
+  - so abre para quem ja tiver uma prova God Hand aprovada
+  - o desafiante escolhe qual membro da God Hand quer enfrentar
+  - o bot bloqueia desafio duplicado se esse defensor ja estiver em outro ticket final
+  - o confronto final acontece em `FT10`
+  - arbitro assume, libera o servidor e registra o vencedor
+  - se o desafiante vencer, o bot aplica o cargo da God Hand automaticamente
+
+## Temporada competitiva
+
+O bot agora acompanha uma camada sazonal em cima dos tickets competitivos:
+
+- `temporada_competitiva`
+  - mostra leaderboard atual, provas/finais ativas e ultimas temporadas arquivadas
+
+- `hall_da_fama_god_hand`
+  - soma desempenho atual + historico arquivado para destacar os maiores nomes da trilha
+
+- `historico_competitivo`
+  - mostra testes, desafios, provas e finais recentes de um membro
+
+- `status_prova_god_hand`
+  - mostra se o membro pode abrir prova, se ja passou, se esta em ticket ativo ou se ja entrou na God Hand
+
+- `encerrar_temporada_competitiva`
+  - arquiva o ranking atual com um nome de temporada e zera apenas os contadores sazonais
+
 Observacoes:
 
 - A ordem das grades segue `GRADE_ROLE_IDS`.
 - Os nomes exibidos nos botoes seguem `GRADE_ROLE_LABELS`.
 - Os subtieres `low/mid/high` seguem `GRADE_SUBTIER_ROLE_IDS` ou nomes em `GRADE_SUBTIER_LABELS`.
-- A prova God Hand usa por padrao `Grade 1` + `High`, mas isso pode ser trocado em `GOD_HAND_TRIAL_GRADE_LABEL` e `GOD_HAND_TRIAL_SUBTIER_LABEL`.
-- Para excluir membros da propria God Hand da fila e pingar esse grupo na aprovacao, configure `GOD_HAND_ROLE_ID` ou `GOD_HAND_ROLE_NAME`.
+- A prova God Hand usa por padrao `Grade 1` + `High`, mas isso pode ser trocado via `/configurar_god_hand` ou pelos fallbacks `GOD_HAND_TRIAL_GRADE_LABEL` e `GOD_HAND_TRIAL_SUBTIER_LABEL`.
+- Para excluir membros da propria God Hand da fila, travar o desafio final ao cargo correto e pingar esse grupo na aprovacao, configure `GOD_HAND_ROLE_ID` ou `GOD_HAND_ROLE_NAME`.
 - Se o cargo de arbitro tiver acento, o ideal e definir `REFEREE_ROLE_ID`.
 - Para saber quem esta `online/offline` de verdade entre os avaliadores, o bot precisaria do `Presence Intent`. Sem isso, ele registra a demanda sem afirmar quem estava offline.
 - Se o canal de avaliacoes nao for configurado, o bot usa o canal de logs como fallback para arquivar as fichas finais.
+- O dashboard web agora tambem mostra leaderboard sazonal, provas/finais recentes e distribuicao de tickets.
 
 ## Economia base e duelo pvp
 

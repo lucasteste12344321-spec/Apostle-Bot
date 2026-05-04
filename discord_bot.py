@@ -21,6 +21,7 @@ from discord.ext import commands
 from config import Settings
 from database import Database
 from views import (
+    GodHandFinalTicketView,
     GodHandTrialTicketView,
     GradeChallengeTicketView,
     GradePanelView,
@@ -256,6 +257,16 @@ PARTICIPATION_CATEGORY_CHOICES = [
     if key != "torneio_reset"
 ]
 
+COMPETITIVE_SEASON_POINT_DEFINITIONS: dict[str, int] = {
+    "grade_test_completed": 6,
+    "grade_challenge_win": 10,
+    "grade_challenge_loss": 3,
+    "god_hand_trial_attempt": 5,
+    "god_hand_trial_pass": 20,
+    "god_hand_final_win": 35,
+    "god_hand_final_loss": 8,
+}
+
 APOSTLE_PROGRESSION_TITLES: tuple[ApostleProgressionTitle, ...] = (
     ApostleProgressionTitle(
         key="apostolo_nivel_1",
@@ -353,6 +364,7 @@ def ticket_type_label(ticket_type: str) -> str:
         "grade_test": "Teste de grade",
         "grade_challenge": "Desafio de grade",
         "god_hand_trial": "Prova God Hand",
+        "god_hand_final": "Desafio final da God Hand",
     }.get(ticket_type, ticket_type)
 
 
@@ -1154,7 +1166,9 @@ class ClanCog(commands.Cog):
         embed.description = (
             "Use os botoes abaixo para os fluxos competitivos.\n\n"
             "- `Pedir teste`: abre ticket de avaliacao de grade\n"
-            "- `Desafio de grade`: abre ticket de desafio com arbitro"
+            "- `Desafio de grade`: abre ticket de desafio com arbitro\n"
+            "- `Prova God Hand`: serie de FT5 para liberar o desafio final\n"
+            "- `Desafio God Hand`: abre o confronto final depois da prova aprovada"
         )
 
         await interaction.response.defer(ephemeral=True)
@@ -1217,6 +1231,67 @@ class ClanCog(commands.Cog):
             payload["anti_raid_enabled"] = int(anti_raid)
         self.bot.database.upsert_feature_settings(interaction.guild.id, **payload)
         await interaction.response.send_message("Configuracoes de seguranca atualizadas.", ephemeral=True)
+
+    @app_commands.command(name="configurar_god_hand", description="Configura o cargo da God Hand e os requisitos da prova.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(
+        cargo_god_hand="Cargo que representa os membros da God Hand.",
+        grade_base="Cargo de grade exigido para abrir a prova.",
+        subtier_base="Cargo de subtier exigido para abrir a prova.",
+    )
+    async def configurar_god_hand(
+        self,
+        interaction: discord.Interaction,
+        cargo_god_hand: discord.Role | None = None,
+        grade_base: discord.Role | None = None,
+        subtier_base: discord.Role | None = None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        if cargo_god_hand is None and grade_base is None and subtier_base is None:
+            configured_god_hand = self.bot.get_configured_god_hand_role(guild)
+            configured_grade = self.bot.get_configured_god_hand_trial_grade_role(guild)
+            configured_subtier = self.bot.get_configured_god_hand_trial_subtier_role(guild)
+            embed = self.build_embed("Configuracao da God Hand", color=discord.Color.dark_red())
+            embed.description = "Use esse comando passando os cargos para salvar uma nova configuracao competitiva."
+            embed.add_field(
+                name="Cargo God Hand",
+                value=configured_god_hand.mention if configured_god_hand is not None else f"Fallback por nome: `{self.bot.settings.god_hand_role_name}`",
+                inline=False,
+            )
+            embed.add_field(
+                name="Grade exigida na prova",
+                value=configured_grade.mention if configured_grade is not None else f"Fallback por label: `{self.bot.settings.god_hand_trial_grade_label}`",
+                inline=False,
+            )
+            embed.add_field(
+                name="Subtier exigido na prova",
+                value=configured_subtier.mention if configured_subtier is not None else f"Fallback por label: `{self.bot.settings.god_hand_trial_subtier_label}`",
+                inline=False,
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        payload: dict[str, Any] = {}
+        if cargo_god_hand is not None:
+            payload["god_hand_role_id"] = cargo_god_hand.id
+        if grade_base is not None:
+            payload["god_hand_trial_grade_role_id"] = grade_base.id
+        if subtier_base is not None:
+            payload["god_hand_trial_subtier_role_id"] = subtier_base.id
+
+        self.bot.database.upsert_feature_settings(guild.id, **payload)
+        lines = []
+        if cargo_god_hand is not None:
+            lines.append(f"Cargo God Hand: {cargo_god_hand.mention}")
+        if grade_base is not None:
+            lines.append(f"Grade-base da prova: {grade_base.mention}")
+        if subtier_base is not None:
+            lines.append(f"Subtier-base da prova: {subtier_base.mention}")
+        await interaction.response.send_message("Configuracao da God Hand atualizada.\n" + "\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="pedir_ajuda", description="Envia um pedido de ajuda e marca quem esta disponivel.")
     @app_commands.describe(motivo="Explique rapidamente o que aconteceu e o que voce precisa.")
@@ -1894,6 +1969,73 @@ class ClanCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="historico_competitivo", description="Resume o historico competitivo completo de um membro.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def historico_competitivo(self, interaction: discord.Interaction, usuario: discord.Member) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        competitive = self.bot.get_competitive_profile(guild.id, usuario.id)
+        trials = self.bot.database.list_recent_god_hand_trials(guild.id, challenger_id=usuario.id, limit=5)
+        finals = self.bot.database.list_recent_god_hand_final_challenges(guild.id, user_id=usuario.id, limit=5)
+        assessments = self.bot.database.list_recent_grade_assessments(guild.id, member_id=usuario.id, limit=3)
+        grade_challenges = self.bot.database.list_recent_grade_challenges(guild.id, user_id=usuario.id, limit=5)
+
+        embed = self.build_embed("Historico competitivo", color=discord.Color.dark_teal())
+        embed.description = f"Leitura consolidada do ciclo competitivo de {usuario.mention}."
+        embed.add_field(name="Season points", value=str(competitive.get("season_points", 0)), inline=True)
+        embed.add_field(name="Testes concluidos", value=str(competitive.get("grade_tests_completed", 0)), inline=True)
+        embed.add_field(name="W/L em desafio", value=f"{competitive.get('grade_challenge_wins', 0)} / {competitive.get('grade_challenge_losses', 0)}", inline=True)
+        embed.add_field(name="Provas God Hand", value=f"{competitive.get('god_hand_trial_passes', 0)} aprovadas em {competitive.get('god_hand_trial_attempts', 0)} tentativa(s)", inline=True)
+        embed.add_field(name="Finais God Hand", value=f"{competitive.get('god_hand_final_wins', 0)} vitorias / {competitive.get('god_hand_final_losses', 0)} derrotas", inline=True)
+        embed.add_field(name="Ultima grade conhecida", value=competitive.get("current_grade_role_name") or "Sem registro", inline=True)
+
+        if assessments:
+            lines = [
+                f"{format_discord_timestamp(row.get('completed_at') or row.get('created_at'), 'R')} | {format_grade_result_label(row.get('assigned_grade_role_name'), row.get('assigned_subtier_role_name'))}"
+                for row in assessments
+            ]
+            embed.add_field(name="Ultimos testes", value=trim_text("\n".join(lines), 1024), inline=False)
+
+        if trials:
+            lines = [
+                f"{format_discord_timestamp(row.get('resolved_at') or row.get('created_at'), 'R')} | {row['status']} | {row['wins_completed']}/{row['total_opponents']}"
+                for row in trials
+            ]
+            embed.add_field(name="Ultimas provas God Hand", value=trim_text("\n".join(lines), 1024), inline=False)
+
+        if grade_challenges:
+            lines = []
+            for row in grade_challenges:
+                if row["challenger_id"] == usuario.id:
+                    side = "Desafiante"
+                    opponent = row["challenged_tag"]
+                else:
+                    side = "Defensor"
+                    opponent = row["challenger_tag"]
+                lines.append(
+                    f"{format_discord_timestamp(row.get('resolved_at') or row.get('created_at'), 'R')} | {side} vs {opponent} | {row.get('result') or row.get('status')}"
+                )
+            embed.add_field(name="Ultimos desafios de grade", value=trim_text("\n".join(lines), 1024), inline=False)
+
+        if finals:
+            lines = []
+            for row in finals:
+                if row["challenger_id"] == usuario.id:
+                    opponent = row["defender_tag"]
+                    side = "Desafiante"
+                else:
+                    opponent = row["challenger_tag"]
+                    side = "Defensor"
+                lines.append(
+                    f"{format_discord_timestamp(row.get('resolved_at') or row.get('created_at'), 'R')} | {side} vs {opponent} | {row.get('result') or row.get('status')}"
+                )
+            embed.add_field(name="Ultimos finais God Hand", value=trim_text("\n".join(lines), 1024), inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @app_commands.command(name="historico_reports", description="Lista reports recentes.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def historico_reports(self, interaction: discord.Interaction) -> None:
@@ -1985,8 +2127,13 @@ class ClanCog(commands.Cog):
 
         member = interaction.user
         profile = self.bot.database.get_grade_profile(guild.id, member.id)
+        competitive_profile = self.bot.get_competitive_profile(guild.id, member.id)
         current_grade = self.bot.get_member_grade_role(member)
         current_subtier = self.bot.get_member_grade_subtier_role(member)
+        active_trial = self.bot.database.get_active_god_hand_trial_for_challenger(guild.id, member.id)
+        active_final = self.bot.database.get_active_god_hand_final_for_challenger(guild.id, member.id)
+        passed_trial = self.bot.database.has_passed_god_hand_trial(guild.id, member.id)
+        god_hand_role = self.bot.get_configured_god_hand_role(guild)
 
         next_test_text = "Disponivel agora"
         next_allowed = self.bot.get_grade_test_cooldown_end(guild.id, member.id)
@@ -2005,6 +2152,7 @@ class ClanCog(commands.Cog):
         )
         embed.add_field(name="Dodges", value=str(profile["dodge_count"]) if profile else "0", inline=True)
         embed.add_field(name="Pode pedir teste", value=next_test_text, inline=True)
+        embed.add_field(name="Pontos da temporada", value=str(competitive_profile.get("season_points", 0)), inline=True)
         embed.add_field(
             name="Ultimo teste concluido",
             value=format_discord_timestamp(profile.get("last_assessment_at") if profile else None, "f"),
@@ -2021,6 +2169,14 @@ class ClanCog(commands.Cog):
             value=format_discord_timestamp(profile.get("last_challenge_at") if profile else None, "f"),
             inline=True,
         )
+        god_hand_status = "Ja esta na God Hand" if god_hand_role is not None and god_hand_role in member.roles else "Ainda fora da God Hand"
+        if active_trial is not None:
+            god_hand_status = f"Prova em andamento (`{active_trial['wins_completed']}/{active_trial['total_opponents']}`)"
+        elif active_final is not None:
+            god_hand_status = "Desafio final em andamento"
+        elif passed_trial:
+            god_hand_status = "Apto a desafiar a God Hand"
+        embed.add_field(name="Status God Hand", value=god_hand_status, inline=False)
         archive_channel = self.bot.get_evaluation_archive_channel(guild)
         embed.add_field(
             name="Arquivo de avaliacoes",
@@ -2028,6 +2184,57 @@ class ClanCog(commands.Cog):
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="status_prova_god_hand", description="Mostra o status atual de um membro na trilha da God Hand.")
+    async def status_prova_god_hand(self, interaction: discord.Interaction, usuario: discord.Member | None = None) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        target = usuario or interaction.user
+        if not isinstance(target, discord.Member):
+            await interaction.response.send_message("Nao consegui identificar o membro.", ephemeral=True)
+            return
+
+        required_grade, required_subtier = self.bot.get_god_hand_trial_requirement_roles(guild)
+        active_trial = self.bot.database.get_active_god_hand_trial_for_challenger(guild.id, target.id)
+        active_final = self.bot.database.get_active_god_hand_final_for_challenger(guild.id, target.id)
+        last_pass = self.bot.database.get_latest_passed_god_hand_trial(guild.id, target.id)
+        competitive = self.bot.get_competitive_profile(guild.id, target.id)
+        god_hand_role = self.bot.get_configured_god_hand_role(guild)
+
+        embed = self.build_embed("Status da trilha God Hand", color=discord.Color.dark_red())
+        embed.add_field(name="Membro", value=target.mention, inline=False)
+        embed.add_field(
+            name="Requisito atual",
+            value=f"{required_grade.mention if required_grade else self.bot.settings.god_hand_trial_grade_label} | {required_subtier.mention if required_subtier else self.bot.settings.god_hand_trial_subtier_label}",
+            inline=False,
+        )
+        eligible_now = self.bot.is_member_god_hand_trial_candidate(target)
+        embed.add_field(name="Pode abrir prova agora", value="Sim" if eligible_now else "Nao", inline=True)
+        embed.add_field(name="Passes na prova", value=str(competitive.get("god_hand_trial_passes", 0)), inline=True)
+        embed.add_field(name="W/L final", value=f"{competitive.get('god_hand_final_wins', 0)} / {competitive.get('god_hand_final_losses', 0)}", inline=True)
+        if god_hand_role is not None and god_hand_role in target.roles:
+            embed.add_field(name="Cargo God Hand", value="Ja possui o cargo.", inline=False)
+        elif active_trial is not None:
+            embed.add_field(
+                name="Prova em andamento",
+                value=f"{active_trial['wins_completed']}/{active_trial['total_opponents']} FT5 vencidos ate agora.",
+                inline=False,
+            )
+        elif active_final is not None:
+            embed.add_field(name="Desafio final", value="Existe um ticket final em andamento.", inline=False)
+        elif last_pass is not None:
+            embed.add_field(
+                name="Apto ao desafio final",
+                value=f"Prova aprovada em {format_discord_timestamp(last_pass.get('resolved_at') or last_pass.get('created_at'), 'f')}.",
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Estado atual", value="Ainda nao existe prova aprovada registrada.", inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=usuario is None)
 
     @app_commands.command(name="resetar_tempo_teste_grade", description="Libera manualmente um membro para pedir teste de grade agora.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -3121,6 +3328,106 @@ class ClanCog(commands.Cog):
         embed.set_footer(text="Ordenado por grade e depois por low/mid/high.")
         await interaction.response.send_message(embed=embed)
 
+    @app_commands.command(name="temporada_competitiva", description="Mostra o ranking atual e o resumo das temporadas competitivas.")
+    async def temporada_competitiva(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        leaderboard = self.bot.database.list_competitive_leaderboard(guild.id, limit=10)
+        seasons = self.bot.database.list_competitive_season_summaries(guild.id, limit=5)
+        overview = self.bot.database.get_competitive_overview(guild.id)
+
+        embed = self.build_embed("Temporada competitiva", color=discord.Color.dark_blue())
+        embed.description = "Resumo da corrida atual por pontos competitivos, provas God Hand e finais."
+        embed.add_field(name="Participantes ativos", value=str(overview["participants"]), inline=True)
+        embed.add_field(name="Provas ativas", value=str(overview["active_trials"]), inline=True)
+        embed.add_field(name="Finais ativos", value=str(overview["active_finals"]), inline=True)
+        embed.add_field(name="Provas aprovadas", value=str(overview["approved_trials"]), inline=True)
+        embed.add_field(name="Vitorias finais", value=str(overview["god_hand_final_wins"]), inline=True)
+        embed.add_field(name="Temporadas arquivadas", value=str(overview["seasons_archived"]), inline=True)
+
+        if leaderboard:
+            lines = []
+            for index, row in enumerate(leaderboard, start=1):
+                member = guild.get_member(row["user_id"])
+                display = member.mention if member is not None else row["user_tag"]
+                lines.append(
+                    f"**{index}.** {display} - `{row['season_points']}` pts | "
+                    f"GH finals `{row['god_hand_final_wins']}` | provas `{row['god_hand_trial_passes']}`"
+                )
+            embed.add_field(name="Top 10 atual", value=trim_text("\n".join(lines), 1024), inline=False)
+        else:
+            embed.add_field(name="Top 10 atual", value="Ainda nao ha pontuacao competitiva registrada.", inline=False)
+
+        if seasons:
+            season_lines = [
+                f"**{row['season_name']}** - campeao: `{row.get('champion_tag') or 'n/a'}` com `{row.get('champion_points') or 0}` pts"
+                for row in seasons
+            ]
+            embed.add_field(name="Temporadas arquivadas", value=trim_text("\n".join(season_lines), 1024), inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="hall_da_fama_god_hand", description="Mostra os maiores nomes da trilha da God Hand.")
+    async def hall_da_fama_god_hand(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+
+        hall = self.bot.database.list_competitive_hall_of_fame(guild.id, limit=10)
+        if not hall:
+            await interaction.response.send_message("Ainda nao ha historico suficiente para montar o Hall da Fama.", ephemeral=True)
+            return
+
+        lines = []
+        for index, row in enumerate(hall, start=1):
+            member = guild.get_member(row["user_id"])
+            display = member.mention if member is not None else row["user_tag"]
+            lines.append(
+                f"**{index}.** {display} - finais `{row['god_hand_final_wins']}` | "
+                f"provas `{row['god_hand_trial_passes']}` | desafios `{row['grade_challenge_wins']}` | lifetime `{row['lifetime_points']}` pts"
+            )
+
+        embed = self.build_embed("Hall da Fama da God Hand", color=discord.Color.dark_red())
+        embed.description = "\n".join(lines)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="encerrar_temporada_competitiva", description="Arquiva o ranking competitivo atual e reinicia a temporada.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(
+        nome="Nome da temporada que vai ser arquivada.",
+        confirmacao="Digite encerrar para confirmar o reset do ranking sazonal.",
+    )
+    async def encerrar_temporada_competitiva(
+        self,
+        interaction: discord.Interaction,
+        nome: str,
+        confirmacao: str,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse comando so funciona no servidor.", ephemeral=True)
+            return
+        if confirmacao.strip().casefold() != "encerrar":
+            await interaction.response.send_message("Digite `encerrar` no campo de confirmacao para continuar.", ephemeral=True)
+            return
+        nome_limpo = nome.strip()
+        if not nome_limpo:
+            await interaction.response.send_message("Informe um nome valido para a temporada antes de encerrar.", ephemeral=True)
+            return
+
+        archived = self.bot.database.archive_current_competitive_season(guild.id, season_name=nome_limpo)
+        if archived == 0:
+            await interaction.response.send_message("Nao existe ranking competitivo atual para arquivar.", ephemeral=True)
+            return
+
+        embed = self.build_embed("Temporada arquivada", color=discord.Color.green())
+        embed.description = f"A temporada **{nome_limpo}** foi encerrada com `{archived}` perfil(is) salvos."
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @app_commands.command(name="exportar_dados", description="Exporta dados do bot em JSON.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def exportar_dados(self, interaction: discord.Interaction, tipo: str) -> None:
@@ -3171,6 +3478,7 @@ class ClanBot(commands.Bot):
         self.grade_test_view = GradeTestTicketView(self)
         self.grade_challenge_view = GradeChallengeTicketView(self)
         self.god_hand_trial_view = GodHandTrialTicketView(self)
+        self.god_hand_final_view = GodHandFinalTicketView(self)
         self.recent_messages: dict[tuple[int, int], deque[datetime]] = defaultdict(lambda: deque(maxlen=8))
         self.recent_joins: dict[int, deque[datetime]] = defaultdict(deque)
         self.recent_raid_alerts: dict[int, datetime] = {}
@@ -3186,6 +3494,7 @@ class ClanBot(commands.Bot):
         self.add_view(self.grade_test_view)
         self.add_view(self.grade_challenge_view)
         self.add_view(self.god_hand_trial_view)
+        self.add_view(self.god_hand_final_view)
         self.add_view(PlayerDuelView(self))
         for panel in self.database.list_help_panels():
             self.add_view(HelpAvailabilityView(self), message_id=panel["message_id"])
@@ -3293,6 +3602,9 @@ class ClanBot(commands.Bot):
             "tournament_min_points": int(stored.get("tournament_min_points") or 0),
             "automod_enabled": bool(stored.get("automod_enabled", 1)),
             "anti_raid_enabled": bool(stored.get("anti_raid_enabled", 1)),
+            "god_hand_role_id": stored.get("god_hand_role_id"),
+            "god_hand_trial_grade_role_id": stored.get("god_hand_trial_grade_role_id"),
+            "god_hand_trial_subtier_role_id": stored.get("god_hand_trial_subtier_role_id"),
         }
 
     def get_tournament_min_points(self, guild_id: int) -> int:
@@ -3304,6 +3616,93 @@ class ClanBot(commands.Bot):
     def get_help_notify_role(self, guild: discord.Guild) -> discord.Role | None:
         role_id = self.get_feature_settings(guild.id)["help_notify_role_id"]
         return guild.get_role(role_id) if role_id else None
+
+    def get_configured_god_hand_role(self, guild: discord.Guild) -> discord.Role | None:
+        role_id = self.get_feature_settings(guild.id)["god_hand_role_id"]
+        if role_id:
+            role = guild.get_role(int(role_id))
+            if role is not None:
+                return role
+        return self.get_god_hand_role(guild)
+
+    def get_configured_god_hand_trial_grade_role(self, guild: discord.Guild) -> discord.Role | None:
+        role_id = self.get_feature_settings(guild.id)["god_hand_trial_grade_role_id"]
+        if role_id:
+            role = guild.get_role(int(role_id))
+            if role is not None:
+                return role
+        return self.get_grade_role_by_label(guild, self.settings.god_hand_trial_grade_label)
+
+    def get_configured_god_hand_trial_subtier_role(self, guild: discord.Guild) -> discord.Role | None:
+        role_id = self.get_feature_settings(guild.id)["god_hand_trial_subtier_role_id"]
+        if role_id:
+            role = guild.get_role(int(role_id))
+            if role is not None:
+                return role
+        return self.find_grade_subtier_role(guild, self.settings.god_hand_trial_subtier_label)
+
+    def get_competitive_profile(self, guild_id: int, user_id: int) -> dict[str, Any]:
+        return self.database.get_competitive_profile(guild_id, user_id) or {
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "user_tag": "",
+            "current_grade_role_id": None,
+            "current_grade_role_name": None,
+            "grade_tests_completed": 0,
+            "grade_challenge_wins": 0,
+            "grade_challenge_losses": 0,
+            "god_hand_trial_attempts": 0,
+            "god_hand_trial_passes": 0,
+            "god_hand_final_wins": 0,
+            "god_hand_final_losses": 0,
+            "season_points": 0,
+        }
+
+    def sync_competitive_grade_state(self, member: discord.Member) -> dict[str, Any]:
+        grade_role = self.get_member_grade_role(member)
+        return self.database.adjust_competitive_profile(
+            guild_id=member.guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            current_grade_role_id=grade_role.id if grade_role is not None else None,
+            current_grade_role_name=grade_role.name if grade_role is not None else None,
+        )
+
+    def award_competitive_points(
+        self,
+        member: discord.Member,
+        *,
+        event_key: str,
+        grade_tests_completed_delta: int = 0,
+        grade_challenge_wins_delta: int = 0,
+        grade_challenge_losses_delta: int = 0,
+        god_hand_trial_attempts_delta: int = 0,
+        god_hand_trial_passes_delta: int = 0,
+        god_hand_final_wins_delta: int = 0,
+        god_hand_final_losses_delta: int = 0,
+        season_points_override: int | None = None,
+    ) -> dict[str, Any]:
+        grade_role = self.get_member_grade_role(member)
+        season_points_delta = (
+            int(season_points_override)
+            if season_points_override is not None
+            else int(COMPETITIVE_SEASON_POINT_DEFINITIONS.get(event_key, 0))
+        )
+        return self.database.adjust_competitive_profile(
+            guild_id=member.guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            current_grade_role_id=grade_role.id if grade_role is not None else None,
+            current_grade_role_name=grade_role.name if grade_role is not None else None,
+            grade_tests_completed_delta=grade_tests_completed_delta,
+            grade_challenge_wins_delta=grade_challenge_wins_delta,
+            grade_challenge_losses_delta=grade_challenge_losses_delta,
+            god_hand_trial_attempts_delta=god_hand_trial_attempts_delta,
+            god_hand_trial_passes_delta=god_hand_trial_passes_delta,
+            god_hand_final_wins_delta=god_hand_final_wins_delta,
+            god_hand_final_losses_delta=god_hand_final_losses_delta,
+            season_points_delta=season_points_delta,
+        )
 
     async def send_ephemeral_response(self, interaction: discord.Interaction, message: str) -> None:
         if interaction.response.is_done():
@@ -3860,8 +4259,8 @@ class ClanBot(commands.Bot):
         return None
 
     def get_god_hand_trial_requirement_roles(self, guild: discord.Guild) -> tuple[discord.Role | None, discord.Role | None]:
-        grade_role = self.get_grade_role_by_label(guild, self.settings.god_hand_trial_grade_label)
-        subtier_role = self.find_grade_subtier_role(guild, self.settings.god_hand_trial_subtier_label)
+        grade_role = self.get_configured_god_hand_trial_grade_role(guild)
+        subtier_role = self.get_configured_god_hand_trial_subtier_role(guild)
         return grade_role, subtier_role
 
     def is_member_god_hand_trial_candidate(self, member: discord.Member) -> bool:
@@ -3877,7 +4276,7 @@ class ClanBot(commands.Bot):
         challenger: discord.Member,
     ) -> tuple[discord.Role | None, discord.Role | None, list[discord.Member]]:
         grade_role, subtier_role = self.get_god_hand_trial_requirement_roles(guild)
-        god_hand_role = self.get_god_hand_role(guild)
+        god_hand_role = self.get_configured_god_hand_role(guild)
         if grade_role is None or subtier_role is None:
             return grade_role, subtier_role, []
 
@@ -3966,6 +4365,56 @@ class ClanBot(commands.Bot):
         embed.set_footer(text="Cada resultado encerra o FT5 atual e avanca para o proximo nome pendente.")
         return embed
 
+    def get_god_hand_defenders(self, guild: discord.Guild) -> list[discord.Member]:
+        role = self.get_configured_god_hand_role(guild)
+        if role is None:
+            return []
+        defenders = [member for member in role.members if not member.bot]
+        defenders.sort(key=lambda item: (normalize_lookup_text(item.display_name), item.id))
+        return defenders
+
+    def build_god_hand_final_embed(
+        self,
+        guild: discord.Guild,
+        challenge: dict[str, Any],
+    ) -> discord.Embed:
+        challenger = guild.get_member(challenge["challenger_id"])
+        defender = guild.get_member(challenge["defender_id"])
+        status_map = {
+            "aberto": ("Desafio final aberto", discord.Color.dark_red(), "Aguardando arbitragem assumir e liberar o confronto."),
+            "arbitragem_assumida": ("Arbitragem assumida", discord.Color.orange(), "A arbitragem ja assumiu o confronto final."),
+            "server_liberado": ("Confronto liberado", discord.Color.gold(), "O FT10 final pode acontecer agora."),
+            "resolvido": ("Confronto resolvido", discord.Color.green(), "O resultado final ja foi registrado."),
+        }
+        title, color, description = status_map.get(
+            str(challenge.get("status")),
+            ("Desafio final da God Hand", discord.Color.dark_red(), "Confronto final da trilha competitiva."),
+        )
+        embed = discord.Embed(title=title, color=color, description=description, timestamp=discord.utils.utcnow())
+        embed.add_field(
+            name="Desafiante",
+            value=challenger.mention if challenger else challenge["challenger_tag"],
+            inline=False,
+        )
+        embed.add_field(
+            name="God Hand desafiado",
+            value=defender.mention if defender else challenge["defender_tag"],
+            inline=False,
+        )
+        embed.add_field(name="Formato", value="FT10 final", inline=True)
+        embed.add_field(name="Status", value=ticket_status_label("em_analise") if challenge.get("server_released_at") else str(challenge["status"]).replace("_", " ").title(), inline=True)
+        embed.add_field(name="Criado em", value=format_discord_timestamp(challenge.get("created_at"), "f"), inline=True)
+        if challenge.get("resolved_at"):
+            embed.add_field(name="Resolvido em", value=format_discord_timestamp(challenge.get("resolved_at"), "f"), inline=True)
+        if challenge.get("result"):
+            result_map = {
+                "challenger_won": "Desafiante venceu e entrou para a God Hand.",
+                "defender_won": "A God Hand defendeu a posicao.",
+            }
+            embed.add_field(name="Resultado", value=result_map.get(challenge["result"], challenge["result"]), inline=False)
+        embed.set_footer(text="Confronto final depois da prova aprovada.")
+        return embed
+
     def get_grade_subtier_index(self, role_name: str | None) -> int:
         if not role_name:
             return -1
@@ -4027,7 +4476,7 @@ class ClanBot(commands.Bot):
 
         if ticket_type == "grade_test":
             add_role(self.get_evaluator_role(guild))
-        elif ticket_type in {"grade_challenge", "god_hand_trial"}:
+        elif ticket_type in {"grade_challenge", "god_hand_trial", "god_hand_final"}:
             add_role(self.get_referee_role(guild))
 
         for role in guild.roles:
@@ -4120,6 +4569,22 @@ class ClanBot(commands.Bot):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    async def show_god_hand_final_rules(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="Regras do desafio final da God Hand",
+            color=self.settings.embed_color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.description = (
+            "- so pode abrir se ja tiver passado na prova God Hand\n"
+            "- o alvo precisa ter o cargo configurado da God Hand\n"
+            "- o confronto final acontece em `ft10`\n"
+            "- a arbitragem assume, libera o server e registra o resultado\n"
+            "- se o desafiante vencer, o bot aplica o cargo da God Hand nele\n"
+            "- o membro derrotado pode tentar de novo em outra oportunidade"
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     def get_pending_grade_evaluation(self, channel_id: int, evaluator_id: int) -> dict[str, str] | None:
         return self.pending_grade_evaluations.get((channel_id, evaluator_id))
 
@@ -4195,6 +4660,7 @@ class ClanBot(commands.Bot):
             "grade_test": "ticket-teste",
             "grade_challenge": "ticket-desafio",
             "god_hand_trial": "ticket-godhand",
+            "god_hand_final": "ticket-godhand-final",
         }.get(ticket_type, "ticket")
         slug = slugify_channel_name(creator.display_name)
         channel_name = f"{prefix}-{slug}-{discord.utils.utcnow().strftime('%H%M%S')}"[:100]
@@ -4782,6 +5248,11 @@ class ClanBot(commands.Bot):
             event_type="grade_assigned",
             details=selected_role.name,
         )
+        self.bot.award_competitive_points(
+            target_member,
+            event_key="grade_test_completed",
+            grade_tests_completed_delta=1,
+        )
 
         result_embed = self.build_grade_evaluation_embed(
             title="Avaliacao final de grade",
@@ -5127,6 +5598,11 @@ class ClanBot(commands.Bot):
             event_type="god_hand_trial_created",
             details=details or f"{len(opponents)} oponentes elegiveis",
         )
+        self.award_competitive_points(
+            challenger,
+            event_key="god_hand_trial_attempt",
+            god_hand_trial_attempts_delta=1,
+        )
 
         trial = self.database.get_god_hand_trial(trial_id)
         opponent_rows = self.database.list_god_hand_trial_opponents(trial_id)
@@ -5155,6 +5631,147 @@ class ClanBot(commands.Bot):
 
         await interaction.followup.send(
             f"Sua prova God Hand foi criada em {ticket_channel.mention}.",
+            ephemeral=True,
+        )
+
+    async def open_god_hand_final_challenge_request(
+        self,
+        interaction: discord.Interaction,
+        *,
+        target_hint: str,
+        details: str | None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Esse painel so funciona no servidor.", ephemeral=True)
+            return
+
+        challenger = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if challenger is None:
+            await interaction.response.send_message("Nao consegui localizar seu usuario no servidor.", ephemeral=True)
+            return
+        if self.database.get_blacklist_entry(guild.id, challenger.id):
+            await interaction.response.send_message("Voce esta na blacklist e nao pode abrir esse ticket.", ephemeral=True)
+            return
+
+        god_hand_role = self.get_configured_god_hand_role(guild)
+        if god_hand_role is None:
+            await interaction.response.send_message("O cargo da God Hand ainda nao foi configurado.", ephemeral=True)
+            return
+        if god_hand_role in challenger.roles:
+            await interaction.response.send_message("Voce ja faz parte da God Hand.", ephemeral=True)
+            return
+        if not self.database.has_passed_god_hand_trial(guild.id, challenger.id):
+            await interaction.response.send_message("Voce ainda precisa passar na prova God Hand antes desse desafio final.", ephemeral=True)
+            return
+
+        active_final = self.database.get_active_god_hand_final_for_challenger(guild.id, challenger.id)
+        if active_final is not None:
+            existing_channel = guild.get_channel(active_final["channel_id"]) if active_final.get("channel_id") else None
+            channel_text = existing_channel.mention if isinstance(existing_channel, discord.TextChannel) else "o ticket que ja esta aberto"
+            await interaction.response.send_message(
+                f"Voce ja tem um desafio final da God Hand em andamento em {channel_text}.",
+                ephemeral=True,
+            )
+            return
+
+        defender = self.find_member_by_hint(guild, target_hint)
+        if defender is None:
+            await interaction.response.send_message("Nao consegui encontrar o membro da God Hand informado.", ephemeral=True)
+            return
+        if defender.id == challenger.id:
+            await interaction.response.send_message("Voce nao pode desafiar a si mesmo.", ephemeral=True)
+            return
+        if defender.bot:
+            await interaction.response.send_message("Nao da para desafiar bots.", ephemeral=True)
+            return
+        if god_hand_role not in defender.roles:
+            await interaction.response.send_message("Esse membro nao esta na God Hand configurada.", ephemeral=True)
+            return
+        active_defense = self.database.get_active_god_hand_final_for_defender(guild.id, defender.id)
+        if active_defense is not None:
+            existing_channel = guild.get_channel(active_defense["channel_id"]) if active_defense.get("channel_id") else None
+            channel_text = existing_channel.mention if isinstance(existing_channel, discord.TextChannel) else "outro ticket final em andamento"
+            await interaction.response.send_message(
+                f"{defender.mention} ja esta ocupado defendendo a God Hand em {channel_text}.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        source_channel = interaction.channel if isinstance(interaction.channel, discord.abc.GuildChannel) else None
+        subject = f"Desafio final da God Hand contra {defender.display_name}"
+        try:
+            ticket_channel, staff_roles = await self.create_private_ticket_channel(
+                guild=guild,
+                creator=challenger,
+                ticket_type="god_hand_final",
+                subject=subject,
+                source_channel=source_channel,
+                extra_members=[defender],
+            )
+        except RuntimeError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.followup.send("Nao consegui criar o ticket do desafio final agora.", ephemeral=True)
+            return
+        except discord.HTTPException:
+            await interaction.followup.send("O Discord recusou a criacao do ticket final agora.", ephemeral=True)
+            return
+
+        ticket_id = self.database.create_ticket(
+            guild_id=guild.id,
+            channel_id=ticket_channel.id,
+            creator_id=challenger.id,
+            creator_tag=str(challenger),
+            creator_display_name=challenger.display_name,
+            ticket_type="god_hand_final",
+            subject=subject,
+            target_user_id=defender.id,
+            target_user_tag=str(defender),
+            metadata={"details": details or "", "target_hint": target_hint},
+        )
+        self.database.create_god_hand_final_challenge(
+            guild_id=guild.id,
+            ticket_id=ticket_id,
+            challenger_id=challenger.id,
+            challenger_tag=str(challenger),
+            defender_id=defender.id,
+            defender_tag=str(defender),
+        )
+        self.database.log_ticket_event(
+            ticket_id=ticket_id,
+            guild_id=guild.id,
+            channel_id=ticket_channel.id,
+            actor_id=challenger.id,
+            actor_tag=str(challenger),
+            event_type="god_hand_final_created",
+            details=details or target_hint,
+        )
+
+        challenge = self.database.get_god_hand_final_challenge_by_ticket(ticket_id)
+        if challenge is None:
+            await interaction.followup.send("Falhei ao registrar o desafio final da God Hand.", ephemeral=True)
+            return
+        embed = self.build_god_hand_final_embed(guild, challenge)
+        if details:
+            embed.add_field(name="Observacoes", value=trim_text(details, 1024), inline=False)
+
+        staff_mentions = " ".join(role.mention for role in staff_roles[:10])
+        intro = (
+            f"{challenger.mention} {defender.mention}\n"
+            f"{staff_mentions}\n"
+            "A arbitragem pode assumir o desafio final pelos botoes abaixo."
+        ).strip()
+        await ticket_channel.send(
+            content=intro,
+            embed=embed,
+            view=GodHandFinalTicketView(self),
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+        )
+        await interaction.followup.send(
+            f"Seu desafio final da God Hand foi criado em {ticket_channel.mention}.",
             ephemeral=True,
         )
 
@@ -5227,6 +5844,41 @@ class ClanBot(commands.Bot):
         await interaction.response.send_message(f"Arbitragem assumida por {member.mention}.", ephemeral=True)
         await channel.send(f"{member.mention} assumiu a arbitragem desta prova God Hand.")
 
+    async def claim_god_hand_final_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket final da God Hand.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem assumir o desafio final.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "god_hand_final":
+            await interaction.response.send_message("Esse canal nao e um ticket final da God Hand.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse desafio final ja foi assumido por outro arbitro.", ephemeral=True)
+            return
+
+        self.database.assign_ticket(channel.id, assigned_to_id=member.id, assigned_to_tag=str(member))
+        self.database.assign_god_hand_final_referee(ticket["id"], referee_id=member.id, referee_tag=str(member))
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="god_hand_final_claimed",
+            details=None,
+        )
+        await interaction.response.send_message(f"Arbitragem assumida por {member.mention}.", ephemeral=True)
+        await channel.send(f"{member.mention} assumiu a arbitragem do desafio final da God Hand.")
+
     async def release_grade_challenge_server_from_interaction(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         channel = interaction.channel
@@ -5295,6 +5947,41 @@ class ClanBot(commands.Bot):
         )
         await interaction.response.send_message("Server liberado e prova pronta para o FT5 atual.", ephemeral=True)
         await channel.send(f"{member.mention} liberou o server para a prova God Hand.")
+
+    async def release_god_hand_final_server_from_interaction(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket final da God Hand.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem liberar o server.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "god_hand_final":
+            await interaction.response.send_message("Esse canal nao e um ticket final da God Hand.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse desafio final foi assumido por outro arbitro.", ephemeral=True)
+            return
+
+        self.database.mark_god_hand_final_server_released(ticket["id"])
+        self.database.update_ticket_status(channel.id, status="em_analise")
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="god_hand_final_server_released",
+            details=None,
+        )
+        await interaction.response.send_message("Server liberado e desafio final pronto para acontecer.", ephemeral=True)
+        await channel.send(f"{member.mention} liberou o server para o desafio final da God Hand.")
 
     async def resolve_god_hand_trial_round_from_interaction(
         self,
@@ -5380,7 +6067,12 @@ class ClanBot(commands.Bot):
                 value=f"{challenger_text} venceu {opponent_text} e concluiu todos os FT5. Agora esta apto a desafiar a God Hand.",
                 inline=False,
             )
-            god_hand_role = self.get_god_hand_role(guild)
+            self.award_competitive_points(
+                challenger,
+                event_key="god_hand_trial_pass",
+                god_hand_trial_passes_delta=1,
+            )
+            god_hand_role = self.get_configured_god_hand_role(guild)
             result_content = god_hand_role.mention if god_hand_role is not None else None
             await channel.send(
                 content=result_content,
@@ -5440,6 +6132,142 @@ class ClanBot(commands.Bot):
             reason=f"Finalizou a prova God Hand de {challenger.display_name if challenger else trial['challenger_tag']}.",
         )
         await interaction.followup.send("FT5 registrado e prova God Hand encerrada.", ephemeral=True)
+
+    async def resolve_god_hand_final_from_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        challenger_won: bool,
+    ) -> None:
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Esse botao so funciona dentro do ticket final da God Hand.", ephemeral=True)
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if member is None or not self.can_manage_grade_challenges(member):
+            await interaction.response.send_message("So arbitros ou admins podem registrar o resultado final.", ephemeral=True)
+            return
+
+        ticket = self.database.get_ticket_by_channel(channel.id)
+        if ticket is None or ticket["ticket_type"] != "god_hand_final":
+            await interaction.response.send_message("Esse canal nao e um ticket final da God Hand.", ephemeral=True)
+            return
+
+        if ticket.get("assigned_to_id") and ticket["assigned_to_id"] != member.id and not member.guild_permissions.administrator:
+            await interaction.response.send_message("Esse desafio final foi assumido por outro arbitro.", ephemeral=True)
+            return
+
+        challenge = self.database.get_god_hand_final_challenge_by_ticket(ticket["id"])
+        if challenge is None:
+            await interaction.response.send_message("Nao encontrei o registro desse desafio final.", ephemeral=True)
+            return
+
+        challenger = guild.get_member(challenge["challenger_id"])
+        defender = guild.get_member(challenge["defender_id"])
+        if challenger is None or defender is None:
+            await interaction.response.send_message("Nao consegui localizar os participantes no servidor.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        result_code = "challenger_won" if challenger_won else "defender_won"
+        god_hand_role = self.get_configured_god_hand_role(guild)
+        if challenger_won and god_hand_role is not None and god_hand_role not in challenger.roles:
+            try:
+                await challenger.add_roles(god_hand_role, reason=f"Vitoria na God Hand registrada por {member}")
+            except discord.Forbidden:
+                await interaction.followup.send("Nao consegui aplicar o cargo da God Hand. Verifique a hierarquia do bot.", ephemeral=True)
+                return
+            except discord.HTTPException:
+                await interaction.followup.send("Falhei ao aplicar o cargo da God Hand agora. Tente novamente.", ephemeral=True)
+                return
+
+        now_iso = discord.utils.utcnow().isoformat(timespec="seconds")
+        challenger_grade = self.get_member_grade_role(challenger)
+        defender_grade = self.get_member_grade_role(defender)
+        challenger_profile = self.database.get_grade_profile(guild.id, challenger.id)
+        defender_profile = self.database.get_grade_profile(guild.id, defender.id)
+        self.database.upsert_grade_profile(
+            guild_id=guild.id,
+            user_id=challenger.id,
+            user_tag=str(challenger),
+            current_grade_role_id=challenger_grade.id if challenger_grade else (challenger_profile.get("current_grade_role_id") if challenger_profile else None),
+            current_grade_role_name=challenger_grade.name if challenger_grade else (challenger_profile.get("current_grade_role_name") if challenger_profile else None),
+            dodge_count=challenger_profile.get("dodge_count") if challenger_profile else 0,
+            last_assessment_at=challenger_profile.get("last_assessment_at") if challenger_profile else None,
+            manual_test_unlock_at=challenger_profile.get("manual_test_unlock_at") if challenger_profile else None,
+            last_challenge_at=now_iso,
+        )
+        self.database.upsert_grade_profile(
+            guild_id=guild.id,
+            user_id=defender.id,
+            user_tag=str(defender),
+            current_grade_role_id=defender_grade.id if defender_grade else (defender_profile.get("current_grade_role_id") if defender_profile else None),
+            current_grade_role_name=defender_grade.name if defender_grade else (defender_profile.get("current_grade_role_name") if defender_profile else None),
+            dodge_count=defender_profile.get("dodge_count") if defender_profile else 0,
+            last_assessment_at=defender_profile.get("last_assessment_at") if defender_profile else None,
+            manual_test_unlock_at=defender_profile.get("manual_test_unlock_at") if defender_profile else None,
+            last_challenge_at=now_iso,
+        )
+        self.database.resolve_god_hand_final_challenge(ticket["id"], result=result_code)
+        self.database.update_ticket_status(channel.id, status="resolvido")
+        self.database.log_ticket_event(
+            ticket_id=ticket["id"],
+            guild_id=guild.id,
+            channel_id=channel.id,
+            actor_id=member.id,
+            actor_tag=str(member),
+            event_type="god_hand_final_resolved",
+            details=result_code,
+        )
+
+        if challenger_won:
+            self.award_competitive_points(
+                challenger,
+                event_key="god_hand_final_win",
+                god_hand_final_wins_delta=1,
+            )
+            self.award_competitive_points(
+                defender,
+                event_key="god_hand_final_loss",
+                god_hand_final_losses_delta=1,
+            )
+        else:
+            self.award_competitive_points(
+                challenger,
+                event_key="god_hand_final_loss",
+                god_hand_final_losses_delta=1,
+            )
+            self.award_competitive_points(
+                defender,
+                event_key="god_hand_final_win",
+                god_hand_final_wins_delta=1,
+            )
+
+        final_row = self.database.get_god_hand_final_challenge_by_ticket(ticket["id"]) or challenge
+        embed = self.build_god_hand_final_embed(guild, final_row)
+        if challenger_won:
+            embed.color = discord.Color.green()
+            embed.add_field(
+                name="Conclusao",
+                value=f"{challenger.mention} venceu o confronto final e agora entrou para a God Hand.",
+                inline=False,
+            )
+        else:
+            embed.color = discord.Color.dark_red()
+            embed.add_field(
+                name="Conclusao",
+                value=f"{defender.mention} defendeu a God Hand com sucesso.",
+                inline=False,
+            )
+        await channel.send(embed=embed)
+        await self.award_participation_points(
+            member,
+            category="arbitragem",
+            reason=f"Finalizou o desafio final da God Hand entre {challenger.display_name} e {defender.display_name}.",
+        )
+        await interaction.followup.send("Resultado final da God Hand registrado com sucesso.", ephemeral=True)
 
     async def resolve_grade_challenge_from_interaction(
         self,
@@ -5560,6 +6388,29 @@ class ClanBot(commands.Bot):
             event_type="grade_challenge_resolved",
             details=result_code,
         )
+
+        if challenger_won:
+            self.bot.award_competitive_points(
+                challenger,
+                event_key="grade_challenge_win",
+                grade_challenge_wins_delta=1,
+            )
+            self.bot.award_competitive_points(
+                challenged,
+                event_key="grade_challenge_loss",
+                grade_challenge_losses_delta=1,
+            )
+        else:
+            self.bot.award_competitive_points(
+                challenger,
+                event_key="grade_challenge_loss",
+                grade_challenge_losses_delta=1,
+            )
+            self.bot.award_competitive_points(
+                challenged,
+                event_key="grade_challenge_win",
+                grade_challenge_wins_delta=1,
+            )
 
         result_embed = discord.Embed(
             title="Resultado do desafio de grade",
@@ -5837,6 +6688,8 @@ class ClanBot(commands.Bot):
         )
         if ticket["ticket_type"] == "god_hand_trial":
             self.database.close_god_hand_trial(ticket["id"])
+        elif ticket["ticket_type"] == "god_hand_final":
+            self.database.close_god_hand_final_challenge(ticket["id"])
         self.database.log_ticket_event(
             ticket_id=ticket["id"],
             guild_id=guild.id,
@@ -6523,37 +7376,255 @@ class ClanBot(commands.Bot):
 
         async def render_index(request: Any) -> Any:
             await ensure_auth(request)
-            guild_id = int(request.query.get("guild", self.guilds[0].id if self.guilds else 0))
+            available_guilds = sorted(self.guilds, key=lambda item: item.name.casefold())
+            default_guild_id = available_guilds[0].id if available_guilds else 0
+            try:
+                guild_id = int(request.query.get("guild", default_guild_id))
+            except (TypeError, ValueError):
+                guild_id = default_guild_id
+
+            guild = self.get_guild(guild_id)
+            if guild is None and available_guilds:
+                guild = available_guilds[0]
+                guild_id = guild.id
+
             stats = self.database.get_dashboard_stats(guild_id)
+            ticket_stats = self.database.get_ticket_statistics(guild_id)
+            overview = self.database.get_competitive_overview(guild_id)
+            leaderboard = self.database.list_competitive_leaderboard(guild_id, limit=10)
+            trials = self.database.list_recent_god_hand_trials(guild_id, limit=5)
+            finals = self.database.list_recent_god_hand_final_challenges(guild_id, limit=5)
+            seasons = self.database.list_competitive_season_summaries(guild_id, limit=5)
             reports = self.database.get_recent_reports(guild_id, limit=5)
             actions = self.database.list_recent_moderation_actions(guild_id, limit=5)
             automod = self.database.list_automod_events(guild_id, limit=5)
-            body = [
-                "<html><head><meta charset='utf-8'><title>Apostle Bot Dashboard</title></head><body>",
-                f"<h1>Dashboard do Apostle Bot - guild {guild_id}</h1>",
-                "<h2>Stats</h2><ul>",
+            token_suffix = f"&token={html.escape(self.settings.dashboard_token)}" if self.settings.dashboard_token else ""
+
+            def build_stat_cards(items: list[tuple[str, Any]]) -> str:
+                cards = []
+                for label, value in items:
+                    cards.append(
+                        "<div class='stat-card'>"
+                        f"<span class='stat-label'>{html.escape(str(label))}</span>"
+                        f"<strong>{html.escape(str(value))}</strong>"
+                        "</div>"
+                    )
+                return "<div class='stats-grid'>" + "".join(cards) + "</div>"
+
+            def build_list(items: list[str], *, empty: str) -> str:
+                if not items:
+                    return f"<p class='empty'>{html.escape(empty)}</p>"
+                return "<ul class='timeline'>" + "".join(f"<li>{item}</li>" for item in items) + "</ul>"
+
+            def build_table(headers: list[str], rows: list[list[str]], *, empty: str) -> str:
+                if not rows:
+                    return f"<p class='empty'>{html.escape(empty)}</p>"
+                head_html = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
+                row_html = []
+                for row in rows:
+                    row_html.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>")
+                return (
+                    "<div class='table-wrap'><table><thead><tr>"
+                    + head_html
+                    + "</tr></thead><tbody>"
+                    + "".join(row_html)
+                    + "</tbody></table></div>"
+                )
+
+            def build_section(title: str, content: str) -> str:
+                return f"<section class='panel'><h2>{html.escape(title)}</h2>{content}</section>"
+
+            guild_links = []
+            for item in available_guilds:
+                current_class = "guild-link active" if item.id == guild_id else "guild-link"
+                guild_links.append(
+                    f"<a class='{current_class}' href='/?guild={item.id}{token_suffix}'>{html.escape(item.name)}</a>"
+                )
+
+            top_stats_html = build_stat_cards(
+                [
+                    ("Mensagens", stats["messages"]),
+                    ("Reports", stats["reports"]),
+                    ("Tickets abertos", stats["tickets_open"]),
+                    ("Moderacao", stats["moderation_actions"]),
+                    ("Automod", stats["automod_events"]),
+                    ("Blacklists", stats["blacklist_entries"]),
+                ]
+            )
+            competitive_stats_html = build_stat_cards(
+                [
+                    ("Perfis competitivos", stats["competitive_profiles"]),
+                    ("Provas God Hand", stats["god_hand_trials"]),
+                    ("Finais God Hand", stats["god_hand_finals"]),
+                    ("Temporadas arquivadas", stats["archived_seasons"]),
+                    ("Provas aprovadas", overview["approved_trials"]),
+                    ("Vitorias finais", overview["god_hand_final_wins"]),
+                ]
+            )
+            ticket_stats_html = build_stat_cards(
+                [
+                    ("Tickets criados", ticket_stats["total_created"]),
+                    ("Ativos agora", ticket_stats["active_now"]),
+                    ("Resolvidos", ticket_stats["resolved_total"]),
+                    ("Fechados", ticket_stats["closed_total"]),
+                ]
+            )
+
+            leaderboard_rows = []
+            for index, row in enumerate(leaderboard, start=1):
+                member = guild.get_member(row["user_id"]) if guild is not None else None
+                display = member.display_name if member is not None else row["user_tag"]
+                leaderboard_rows.append(
+                    [
+                        html.escape(str(index)),
+                        html.escape(display),
+                        html.escape(str(row["season_points"])),
+                        html.escape(str(row["god_hand_trial_passes"])),
+                        html.escape(str(row["god_hand_final_wins"])),
+                    ]
+                )
+
+            trial_items = []
+            for row in trials:
+                challenger = guild.get_member(row["challenger_id"]) if guild is not None else None
+                display = challenger.display_name if challenger is not None else row["challenger_tag"]
+                trial_items.append(
+                    f"<strong>{html.escape(display)}</strong> - "
+                    f"{html.escape(str(row['status']).replace('_', ' ').title())} - "
+                    f"{html.escape(str(row['wins_completed']))}/{html.escape(str(row['total_opponents']))} FT5"
+                )
+
+            final_items = []
+            for row in finals:
+                challenger = guild.get_member(row["challenger_id"]) if guild is not None else None
+                defender = guild.get_member(row["defender_id"]) if guild is not None else None
+                challenger_name = challenger.display_name if challenger is not None else row["challenger_tag"]
+                defender_name = defender.display_name if defender is not None else row["defender_tag"]
+                final_items.append(
+                    f"<strong>{html.escape(challenger_name)}</strong> vs {html.escape(defender_name)} - "
+                    f"{html.escape(str(row.get('result') or row['status']).replace('_', ' ').title())}"
+                )
+
+            season_rows = [
+                [
+                    html.escape(row["season_name"]),
+                    html.escape(row.get("champion_tag") or "n/a"),
+                    html.escape(str(row.get("champion_points") or 0)),
+                    html.escape(str(row.get("total_members") or 0)),
+                ]
+                for row in seasons
             ]
-            for key, value in stats.items():
-                body.append(f"<li>{html.escape(key)}: {html.escape(str(value))}</li>")
-            body.append("</ul><h2>Reports recentes</h2><ul>")
-            for report in reports:
-                body.append(
-                    f"<li>{html.escape(report['created_at'])} - {html.escape(report['reported_tag'])}: "
-                    f"{html.escape(report['reason'])}</li>"
-                )
-            body.append("</ul><h2>Moderacao recente</h2><ul>")
-            for action in actions:
-                body.append(
-                    f"<li>{html.escape(action['created_at'])} - {html.escape(action['action_type'])} "
-                    f"em {html.escape(action['target_user_tag'])}</li>"
-                )
-            body.append("</ul><h2>Automod recente</h2><ul>")
-            for event in automod:
-                body.append(
-                    f"<li>{html.escape(event['created_at'])} - {html.escape(event['event_type'])} "
-                    f"({html.escape(event.get('action_taken') or 'sem acao')})</li>"
-                )
-            body.append("</ul></body></html>")
+            reports_items = [
+                f"<strong>{html.escape(report['reported_tag'])}</strong> - {html.escape(trim_text(report['reason'], 160))}"
+                for report in reports
+            ]
+            moderation_items = [
+                f"<strong>{html.escape(action['action_type'])}</strong> em {html.escape(action['target_user_tag'])}"
+                for action in actions
+            ]
+            automod_items = [
+                f"<strong>{html.escape(event['event_type'])}</strong> - {html.escape(event.get('action_taken') or 'sem acao')}"
+                for event in automod
+            ]
+            ticket_type_rows = [
+                [
+                    html.escape(str(row["ticket_type"])),
+                    html.escape(str(row["total"])),
+                    html.escape(str(row["active"])),
+                ]
+                for row in ticket_stats["by_type"]
+            ]
+            ticket_status_rows = [
+                [
+                    html.escape(str(row["status"])),
+                    html.escape(str(row["total"])),
+                ]
+                for row in ticket_stats["by_status"]
+            ]
+
+            body = [
+                "<html><head><meta charset='utf-8'><title>Apostle Bot Dashboard</title>",
+                "<style>"
+                ":root{color-scheme:dark;font-family:Segoe UI,Arial,sans-serif;}"
+                "body{margin:0;background:#10151b;color:#e8edf4;}"
+                "main{max-width:1280px;margin:0 auto;padding:24px;}"
+                ".hero{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;flex-wrap:wrap;margin-bottom:20px;}"
+                ".hero h1{margin:0;font-size:32px;}"
+                ".hero p{margin:6px 0 0;color:#a9b5c4;}"
+                ".guild-nav{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0 24px;}"
+                ".guild-link{padding:10px 14px;border-radius:999px;background:#18212b;color:#c8d2dd;text-decoration:none;border:1px solid #263240;}"
+                ".guild-link.active{background:#7c2d12;color:#fff6ee;border-color:#c2410c;}"
+                ".layout{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;}"
+                ".panel{background:#151d26;border:1px solid #243140;border-radius:18px;padding:18px;box-shadow:0 10px 30px rgba(0,0,0,.18);}"
+                ".panel h2{margin:0 0 14px;font-size:18px;}"
+                ".stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;}"
+                ".stat-card{background:#0f141a;border:1px solid #23303d;border-radius:14px;padding:14px;}"
+                ".stat-label{display:block;color:#93a3b5;font-size:12px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;}"
+                ".stat-card strong{font-size:24px;}"
+                ".timeline{margin:0;padding-left:18px;display:grid;gap:10px;}"
+                ".timeline li{line-height:1.45;}"
+                ".table-wrap{overflow:auto;}"
+                "table{width:100%;border-collapse:collapse;font-size:14px;}"
+                "th,td{padding:10px 8px;border-bottom:1px solid #22303b;text-align:left;}"
+                "th{color:#98a9bb;font-weight:600;}"
+                ".empty{margin:0;color:#8fa1b3;}"
+                ".muted{color:#8fa1b3;}"
+                "</style></head><body><main>",
+                "<div class='hero'>",
+                "<div>",
+                f"<h1>Dashboard do Apostle Bot</h1><p>{html.escape(guild.name if guild is not None else 'Nenhum servidor conectado')} | guild {guild_id}</p>",
+                "</div>",
+                "<div class='muted'>Visao operacional, competitiva e historica do servidor.</div>",
+                "</div>",
+                "<nav class='guild-nav'>",
+                "".join(guild_links) if guild_links else "<span class='muted'>Nenhum servidor disponivel.</span>",
+                "</nav>",
+                "<div class='layout'>",
+                build_section("Saude geral", top_stats_html),
+                build_section("Competitivo", competitive_stats_html),
+                build_section("Tickets", ticket_stats_html),
+                build_section(
+                    "Leaderboard sazonal",
+                    build_table(
+                        ["#", "Membro", "Pontos", "Provas", "Finais"],
+                        leaderboard_rows,
+                        empty="Ainda nao ha pontuacao competitiva registrada.",
+                    ),
+                ),
+                build_section(
+                    "Provas God Hand recentes",
+                    build_list(trial_items, empty="Nenhuma prova registrada ainda."),
+                ),
+                build_section(
+                    "Finais God Hand recentes",
+                    build_list(final_items, empty="Nenhum desafio final registrado ainda."),
+                ),
+                build_section(
+                    "Temporadas arquivadas",
+                    build_table(
+                        ["Temporada", "Campeao", "Pontos", "Perfis"],
+                        season_rows,
+                        empty="Nenhuma temporada arquivada ainda.",
+                    ),
+                ),
+                build_section(
+                    "Distribuicao de tickets",
+                    build_table(
+                        ["Tipo", "Total", "Ativos"],
+                        ticket_type_rows,
+                        empty="Nenhum ticket registrado ainda.",
+                    )
+                    + build_table(
+                        ["Status", "Total"],
+                        ticket_status_rows,
+                        empty="Sem status de tickets para exibir.",
+                    ),
+                ),
+                build_section("Reports recentes", build_list(reports_items, empty="Nenhum report recente.")),
+                build_section("Moderacao recente", build_list(moderation_items, empty="Nenhuma acao recente.")),
+                build_section("Automod recente", build_list(automod_items, empty="Nenhum evento recente.")),
+                "</div></main></body></html>",
+            ]
             return web.Response(text="".join(body), content_type="text/html")
 
         app = web.Application()

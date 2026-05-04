@@ -434,6 +434,40 @@ class GodHandTrialRequestModal(discord.ui.Modal):
             await interaction.response.send_message("Nao consegui abrir a prova God Hand agora.", ephemeral=True)
 
 
+class GodHandFinalChallengeRequestModal(discord.ui.Modal):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(title="Abrir desafio final da God Hand")
+        self.bot = bot
+        self.target = discord.ui.TextInput(
+            label="Qual God Hand voce quer desafiar",
+            placeholder="Use @usuario, ID ou nome",
+            max_length=120,
+        )
+        self.details = discord.ui.TextInput(
+            label="Observacoes",
+            style=discord.TextStyle.paragraph,
+            placeholder="Detalhes opcionais para a arbitragem",
+            required=False,
+            max_length=1200,
+        )
+        self.add_item(self.target)
+        self.add_item(self.details)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.bot.open_god_hand_final_challenge_request(
+            interaction,
+            target_hint=self.target.value.strip(),
+            details=self.details.value.strip() or None,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.exception("Erro ao abrir desafio final da God Hand", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Nao consegui abrir o desafio final da God Hand agora.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nao consegui abrir o desafio final da God Hand agora.", ephemeral=True)
+
+
 class GradeEvaluationModal(discord.ui.Modal):
     def __init__(self, bot: "ClanBot") -> None:
         super().__init__(title="Avaliacao 1/2")
@@ -784,6 +818,81 @@ class GodHandTrialTicketView(discord.ui.View):
             await interaction.response.send_message("Nao consegui concluir essa acao da prova God Hand agora.", ephemeral=True)
 
 
+class GodHandFinalTicketView(discord.ui.View):
+    def __init__(self, bot: "ClanBot") -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="Assumir arbitragem", style=discord.ButtonStyle.primary, custom_id="god_hand_final:claim", row=0)
+    async def claim_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.claim_god_hand_final_from_interaction(interaction)
+
+    @discord.ui.button(label="Liberar servidor", style=discord.ButtonStyle.success, custom_id="god_hand_final:release", row=0)
+    async def release_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.release_god_hand_final_server_from_interaction(interaction)
+
+    @discord.ui.button(label="Ver regras", style=discord.ButtonStyle.secondary, custom_id="god_hand_final:rules", row=0)
+    async def rules_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.show_god_hand_final_rules(interaction)
+
+    @discord.ui.button(label="Desafiante venceu", style=discord.ButtonStyle.success, custom_id="god_hand_final:challenger_won", row=1)
+    async def challenger_win_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.resolve_god_hand_final_from_interaction(interaction, challenger_won=True)
+
+    @discord.ui.button(label="God Hand venceu", style=discord.ButtonStyle.secondary, custom_id="god_hand_final:defender_won", row=1)
+    async def defender_win_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await self.bot.resolve_god_hand_final_from_interaction(interaction, challenger_won=False)
+
+    @discord.ui.button(label="Fechar ticket", style=discord.ButtonStyle.danger, custom_id="god_hand_final:close", row=2)
+    async def close_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        ticket = self.bot.database.get_ticket_by_channel(interaction.channel.id) if isinstance(interaction.channel, discord.TextChannel) else None
+        if ticket is None:
+            if interaction.response.is_done():
+                await interaction.followup.send("Nao encontrei esse ticket.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Nao encontrei esse ticket.", ephemeral=True)
+            return
+        await self.bot.close_ticket_from_interaction(interaction, ticket)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[discord.ui.View]) -> None:
+        del item
+        logger.exception("Erro no desafio final da God Hand", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Nao consegui concluir essa acao do desafio final agora.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nao consegui concluir essa acao do desafio final agora.", ephemeral=True)
+
+
 class GradePanelView(discord.ui.View):
     def __init__(self, bot: "ClanBot") -> None:
         super().__init__(timeout=None)
@@ -815,6 +924,15 @@ class GradePanelView(discord.ui.View):
     ) -> None:
         del button
         await interaction.response.send_modal(GodHandTrialRequestModal(self.bot))
+
+    @discord.ui.button(label="Desafio God Hand", style=discord.ButtonStyle.danger, custom_id="grade_panel:god_hand_final", row=1)
+    async def god_hand_final_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[discord.ui.View],
+    ) -> None:
+        del button
+        await interaction.response.send_modal(GodHandFinalChallengeRequestModal(self.bot))
 
 
 class TicketPanelView(discord.ui.View):
